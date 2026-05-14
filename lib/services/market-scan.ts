@@ -19,7 +19,7 @@ const sp500: { symbol: string; name: string; sector: string }[] = require("@/dat
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const SCAN_DAILY_LIMIT = 6;
+const SCAN_DAILY_LIMIT = parseInt(process.env.SCAN_DAILY_LIMIT ?? "6", 10);
 const SCAN_EXPIRY_DAYS = 7;
 
 interface SectorImpact {
@@ -112,8 +112,10 @@ export class MarketScanService {
 
     // Step 1: Fetch recent political/regulatory/geopolitical news
     const politicalArticles = await this.fetchPoliticalNews();
+    console.log(`[scan ${scanId}] step1: ${politicalArticles.length} political/macro articles`);
 
     if (politicalArticles.length === 0) {
+      console.log(`[scan ${scanId}] aborting — no news articles found`);
       return { scanId, candidatesFound: 0, sectorsImpacted: [], scannedAt, scansRemainingToday: remaining - 1 };
     }
 
@@ -125,7 +127,10 @@ export class MarketScanService {
 
     // Step 2: Claude Sonnet classifies which sectors are impacted
     const sectorImpacts = await this.classifySectors(politicalArticles);
+    console.log(`[scan ${scanId}] step2: ${sectorImpacts.length} sector impacts — ${sectorImpacts.map(s => s.sector).join(", ")}`);
+
     if (sectorImpacts.length === 0) {
+      console.log(`[scan ${scanId}] aborting — Claude returned no impacted sectors`);
       return { scanId, candidatesFound: 0, sectorsImpacted: [], scannedAt, scansRemainingToday: remaining - 1 };
     }
 
@@ -135,6 +140,7 @@ export class MarketScanService {
     const candidates = sp500
       .filter((stock) => impactedSectorNames.includes(stock.sector))
       .slice(0, 20);
+    console.log(`[scan ${scanId}] step3: ${candidates.length} S&P 500 candidates in sectors: ${impactedSectorNames.join(", ")}`);
 
     // Step 4: For each candidate, gather congress cluster + recent news + Claude Opus analysis
     const results: Omit<ScanResult, "_id">[] = [];
@@ -151,9 +157,14 @@ export class MarketScanService {
           scannedAt,
           expiresAt
         );
-        if (result) results.push(result);
-      } catch {
-        // Skip failed candidates — don't abort the whole scan
+        if (result) {
+          results.push(result);
+          console.log(`[scan ${scanId}] ✓ ${candidate.symbol} confidence=${result.aiAnalysis?.confidence}`);
+        } else {
+          console.log(`[scan ${scanId}] ✗ ${candidate.symbol} filtered out`);
+        }
+      } catch (err) {
+        console.log(`[scan ${scanId}] ✗ ${candidate.symbol} error: ${String(err).slice(0, 120)}`);
       }
     }
 
@@ -225,7 +236,7 @@ export class MarketScanService {
 
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 1024,
+      max_tokens: 2048,
       system: SECTOR_SCAN_SYSTEM_PROMPT,
       messages: [{ role: "user", content: prompt }],
     });
@@ -233,9 +244,11 @@ export class MarketScanService {
     const text = response.content[0].type === "text" ? response.content[0].text : "";
 
     try {
-      const parsed = JSON.parse(text) as { impactedSectors: SectorImpact[] };
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(jsonMatch?.[0] ?? text) as { impactedSectors: SectorImpact[] };
       return parsed.impactedSectors ?? [];
-    } catch {
+    } catch (err) {
+      console.error("[scan classifySectors] JSON parse failed:", err, "\nRaw response:", text.slice(0, 500));
       return [];
     }
   }
@@ -387,8 +400,10 @@ export class MarketScanService {
     const text = response.content[0].type === "text" ? response.content[0].text : "";
 
     try {
-      return JSON.parse(text) as ScanResult["aiAnalysis"];
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      return JSON.parse(jsonMatch?.[0] ?? text) as ScanResult["aiAnalysis"];
     } catch {
+      console.error(`[scan runCandidateAnalysis] parse failed for ${params.symbol}:`, text.slice(0, 300));
       return null;
     }
   }
