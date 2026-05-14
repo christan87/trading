@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { ObjectId } from "mongodb";
 import { getCollections } from "@/lib/db/mongodb";
 import { getRedis } from "@/lib/utils/redis";
-import { newsService } from "@/lib/services/news";
+import { newsService, inferCategory, inferSentiment } from "@/lib/services/news";
 import { congressService } from "@/lib/services/congress";
 import type { ScanResult, NewsEvent } from "@/lib/db/models";
 import {
@@ -175,14 +175,42 @@ export class MarketScanService {
   private async fetchPoliticalNews(): Promise<NewsEvent[]> {
     const { news } = await getCollections();
     const since = new Date(Date.now() - 3 * 86400_000);
-    return news
+    const stored = await news
       .find({
-        category: { $in: ["political", "regulatory", "geopolitical"] },
+        category: { $in: ["political", "regulatory", "geopolitical", "macro"] },
         publishedAt: { $gte: since },
       })
       .sort({ publishedAt: -1 })
       .limit(50)
       .toArray();
+
+    if (stored.length > 0) return stored;
+
+    // Fallback: fetch directly from Finnhub when the news DB is empty
+    try {
+      const FINNHUB_KEY = process.env.FINNHUB_API_KEY ?? "";
+      const res = await fetch(
+        `https://finnhub.io/api/v1/news?category=general&minId=0&token=${FINNHUB_KEY}`
+      );
+      if (!res.ok) return [];
+      // external API response — shape is unknown at compile time
+      const items = await res.json() as { id: number; headline: string; summary: string; related: string; datetime: number }[];
+      return items.slice(0, 50).map((item) => ({
+        _id: undefined as never,
+        sourceApi: "finnhub" as const,
+        externalId: String(item.id),
+        headline: item.headline ?? "",
+        summary: item.summary || item.headline || "",
+        tickers: item.related ? String(item.related).split(",").map((s: string) => s.trim()).filter(Boolean) : [],
+        category: inferCategory(item.headline ?? ""),
+        sentiment: inferSentiment((item.headline ?? "") + " " + (item.summary ?? "")),
+        historicalAnalogs: null,
+        publishedAt: new Date(item.datetime * 1000),
+        ingestedAt: new Date(),
+      })).filter((a) => ["political", "regulatory", "geopolitical", "macro"].includes(a.category));
+    } catch {
+      return [];
+    }
   }
 
   private async classifySectors(articles: NewsEvent[]): Promise<SectorImpact[]> {

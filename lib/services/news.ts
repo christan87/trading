@@ -50,7 +50,7 @@ async function fetchFinnhubNews(symbol: string): Promise<FinnhubNewsItem[]> {
   return res.json();
 }
 
-function inferSentiment(
+export function inferSentiment(
   text: string
 ): "positive" | "negative" | "neutral" {
   const lower = text.toLowerCase();
@@ -63,13 +63,35 @@ function inferSentiment(
   return "neutral";
 }
 
-function inferCategory(headline: string): NewsEvent["category"] {
+export function inferCategory(headline: string): NewsEvent["category"] {
   const lower = headline.toLowerCase();
-  if (lower.includes("congress") || lower.includes("senate") || lower.includes("house") || lower.includes("legislation")) return "political";
+  if (
+    lower.includes("congress") || lower.includes("senate") || lower.includes("house") ||
+    lower.includes("legislation") || lower.includes("president") || lower.includes("administration") ||
+    lower.includes("executive order") || lower.includes("policy") || lower.includes("government") ||
+    lower.includes("white house") || lower.includes("treasury") || lower.includes("budget") ||
+    lower.includes("election") || lower.includes("vote") || lower.includes("bill passed") ||
+    lower.includes("tariff") || lower.includes("trade war") || lower.includes("trade deal")
+  ) return "political";
   if (lower.includes("earnings") || lower.includes("eps") || lower.includes("revenue") || lower.includes("guidance")) return "earnings";
-  if (lower.includes("fed") || lower.includes("inflation") || lower.includes("rate") || lower.includes("gdp")) return "macro";
-  if (lower.includes("fda") || lower.includes("sec") || lower.includes("regulation") || lower.includes("compliance")) return "regulatory";
-  if (lower.includes("war") || lower.includes("geopolit") || lower.includes("sanction") || lower.includes("tariff")) return "geopolitical";
+  if (
+    lower.includes("fed ") || lower.includes("federal reserve") || lower.includes("inflation") ||
+    lower.includes("interest rate") || lower.includes("gdp") || lower.includes("recession") ||
+    lower.includes("unemployment") || lower.includes("cpi") || lower.includes("jobs report") ||
+    lower.includes("economic growth")
+  ) return "macro";
+  if (
+    lower.includes("fda") || lower.includes("sec ") || lower.includes("regulation") ||
+    lower.includes("compliance") || lower.includes("ftc") || lower.includes("doj") ||
+    lower.includes("antitrust") || lower.includes("lawsuit") || lower.includes("fine") ||
+    lower.includes("penalty") || lower.includes("epa") || lower.includes("ruling")
+  ) return "regulatory";
+  if (
+    lower.includes("war") || lower.includes("geopolit") || lower.includes("sanction") ||
+    lower.includes("conflict") || lower.includes("military") || lower.includes("nato") ||
+    lower.includes("china") || lower.includes("russia") || lower.includes("middle east") ||
+    lower.includes("opec") || lower.includes("oil supply")
+  ) return "geopolitical";
   return "sector";
 }
 
@@ -192,10 +214,8 @@ export class NewsService {
     const { news } = await getCollections();
     let inserted = 0;
 
-    for (const item of items.slice(0, 30)) {
+    for (const item of items.slice(0, 50)) {
       const category = inferCategory(item.headline);
-      if (!["political", "regulatory", "geopolitical"].includes(category)) continue;
-
       const doc: Omit<NewsEvent, "_id"> = {
         sourceApi: "finnhub",
         externalId: String(item.id),
