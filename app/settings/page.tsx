@@ -1,4 +1,6 @@
 import { auth, signIn } from "@/lib/auth";
+import { getCollections } from "@/lib/db/mongodb";
+import { ObjectId } from "mongodb";
 
 const REDIRECT_URI = `${process.env.NEXTAUTH_URL ?? "http://localhost:3000"}/api/auth/callback/alpaca`;
 const CLIENT_ID_SET = Boolean(process.env.ALPACA_CLIENT_ID);
@@ -20,6 +22,21 @@ export default async function SettingsPage() {
   const session = await auth();
   const allConfigured = CLIENT_ID_SET && CLIENT_SECRET_SET;
 
+  // Check if Alpaca OAuth token is actually stored, not just whether a session exists
+  let alpacaConnected = false;
+  if (session?.user) {
+    try {
+      const userId = (session.user as { id?: string }).id;
+      if (userId) {
+        const { users } = await getCollections();
+        const dbUser = await users.findOne({ _id: new ObjectId(userId) });
+        alpacaConnected = Boolean(dbUser?.alpacaOAuthToken);
+      }
+    } catch {
+      // DB check failed — treat as not connected so user can reconnect
+    }
+  }
+
   return (
     <div className="p-4 max-w-2xl mx-auto space-y-6">
       <h1 className="text-xl font-semibold text-white">Settings</h1>
@@ -27,13 +44,26 @@ export default async function SettingsPage() {
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
         <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">Brokerage Connection</h2>
 
-        {session?.user ? (
+        {alpacaConnected ? (
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-emerald-400" />
               <span className="text-sm text-zinc-300">Connected to Alpaca Markets</span>
             </div>
-            <p className="text-xs text-zinc-500">{session.user.email}</p>
+            <p className="text-xs text-zinc-500">{session?.user?.email}</p>
+            <form
+              action={async () => {
+                "use server";
+                await signIn("alpaca", { redirectTo: "/dashboard" });
+              }}
+            >
+              <button
+                type="submit"
+                className="mt-2 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-400 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                Re-connect Alpaca Account
+              </button>
+            </form>
           </div>
         ) : (
           <div className="space-y-4">

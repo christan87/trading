@@ -12,8 +12,14 @@ export async function GET(req: NextRequest) {
   if (!symbol) return NextResponse.json({ error: "symbol required" }, { status: 400 });
 
   try {
-    const contracts = await marketDataService.getOptionsChain(symbol, expiration);
-    return NextResponse.json({ symbol, contracts });
+    const { contracts, planLimited } = await marketDataService.getOptionsChain(symbol, expiration);
+    return NextResponse.json({
+      symbol,
+      contracts,
+      ...(planLimited && {
+        note: "Options data requires Alpaca Algo Trader Plus. Upgrade at app.alpaca.markets.",
+      }),
+    });
   } catch (err) {
     console.error("[api/market/options-chain]", err);
     return NextResponse.json({ error: "Failed to fetch options chain" }, { status: 500 });

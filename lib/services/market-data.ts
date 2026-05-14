@@ -171,39 +171,48 @@ export class MarketDataService {
   async getOptionsChain(
     symbol: string,
     expiration?: string
-  ): Promise<OptionsContract[]> {
+  ): Promise<{ contracts: OptionsContract[]; planLimited: boolean }> {
     const params = new URLSearchParams({ underlying_symbols: symbol, limit: "100" });
     if (expiration) params.set("expiration_date_gte", expiration);
 
-    const data = await alpacaDataFetch<{
-      option_contracts: {
-        symbol: string;
-        strike_price: string;
-        expiration_date: string;
-        type: "call" | "put";
-        open_interest: number;
-        volume: number;
-        close_price: string | null;
-        greeks: { delta: number | null; gamma: number | null; theta: number | null; vega: number | null } | null;
-        implied_volatility: string | null;
-      }[];
-    }>(`/v2/options/snapshots/${symbol}?feed=indicative`);
+    try {
+      const data = await alpacaDataFetch<{
+        option_contracts: {
+          symbol: string;
+          strike_price: string;
+          expiration_date: string;
+          type: "call" | "put";
+          open_interest: number;
+          volume: number;
+          close_price: string | null;
+          greeks: { delta: number | null; gamma: number | null; theta: number | null; vega: number | null } | null;
+          implied_volatility: string | null;
+        }[];
+      }>(`/v2/options/snapshots/${symbol}?feed=indicative`);
 
-    return (data.option_contracts ?? []).map((c) => ({
-      symbol: c.symbol,
-      strike_price: parseFloat(c.strike_price),
-      expiration_date: c.expiration_date,
-      type: c.type,
-      open_interest: c.open_interest,
-      volume: c.volume,
-      bid: 0,
-      ask: parseFloat(c.close_price ?? "0"),
-      implied_volatility: c.implied_volatility ? parseFloat(c.implied_volatility) : null,
-      delta: c.greeks?.delta ?? null,
-      gamma: c.greeks?.gamma ?? null,
-      theta: c.greeks?.theta ?? null,
-      vega: c.greeks?.vega ?? null,
-    }));
+      const contracts = (data.option_contracts ?? []).map((c) => ({
+        symbol: c.symbol,
+        strike_price: parseFloat(c.strike_price),
+        expiration_date: c.expiration_date,
+        type: c.type,
+        open_interest: c.open_interest,
+        volume: c.volume,
+        bid: 0,
+        ask: parseFloat(c.close_price ?? "0"),
+        implied_volatility: c.implied_volatility ? parseFloat(c.implied_volatility) : null,
+        delta: c.greeks?.delta ?? null,
+        gamma: c.greeks?.gamma ?? null,
+        theta: c.greeks?.theta ?? null,
+        vega: c.greeks?.vega ?? null,
+      }));
+      return { contracts, planLimited: false };
+    } catch (err) {
+      // Alpaca Basic plan does not include options snapshots (returns 404)
+      if (String(err).includes("404")) {
+        return { contracts: [], planLimited: true };
+      }
+      throw err;
+    }
   }
 
   async getCompanyProfile(symbol: string): Promise<{

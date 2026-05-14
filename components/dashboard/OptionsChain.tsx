@@ -25,6 +25,7 @@ export function OptionsChain({ symbol }: OptionsChainProps) {
   const [loading, setLoading] = useState(false);
   const [selectedExp, setSelectedExp] = useState<string>("");
   const [side, setSide] = useState<"call" | "put">("call");
+  const [planNote, setPlanNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (!symbol) return;
@@ -34,6 +35,7 @@ export function OptionsChain({ symbol }: OptionsChainProps) {
       .then((d) => {
         const all: OptionsContract[] = d.contracts ?? [];
         setContracts(all);
+        setPlanNote(d.note ?? null);
         if (all.length > 0 && !selectedExp) {
           const exps = [...new Set(all.map((c) => c.expiration_date))].sort();
           setSelectedExp(exps[0] ?? "");
@@ -83,6 +85,8 @@ export function OptionsChain({ symbol }: OptionsChainProps) {
         <div className="space-y-1 animate-pulse">
           {[1,2,3,4].map((i) => <div key={i} className="h-8 bg-zinc-800 rounded" />)}
         </div>
+      ) : planNote ? (
+        <p className="text-sm text-zinc-500">{planNote}</p>
       ) : filtered.length === 0 ? (
         <p className="text-sm text-zinc-500">No options data available.</p>
       ) : (

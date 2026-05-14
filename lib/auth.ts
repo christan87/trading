@@ -44,6 +44,7 @@ export const authConfig: NextAuthConfig = {
     async signIn({ account, user }) {
       if (account?.provider === "alpaca" && account.access_token) {
         try {
+          const { ObjectId } = await import("mongodb");
           const { users } = await getCollections();
           const encryptedToken = encrypt(account.access_token);
           const encryptedRefresh = account.refresh_token
@@ -53,8 +54,13 @@ export const authConfig: NextAuthConfig = {
             ? new Date(account.expires_at * 1000)
             : null;
 
+          // Use _id when user already exists (returning user), email for first sign-in
+          const query = user.id
+            ? { _id: new ObjectId(user.id) }
+            : { email: user.email ?? "" };
+
           await users.updateOne(
-            { email: user.email ?? "" },
+            query,
             {
               $set: {
                 alpacaOAuthToken: encryptedToken,
@@ -79,7 +85,7 @@ export const authConfig: NextAuthConfig = {
                 createdAt: new Date(),
               },
             },
-            { upsert: true }
+            { upsert: !user.id }
           );
         } catch (err) {
           console.error("[auth] Failed to store Alpaca token:", err);
