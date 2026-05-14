@@ -103,7 +103,12 @@ export async function runStrategyEngine(
 
     if (!user) return { error: "User not found" };
 
-    const currentQuote = await marketDataService.getQuote(req.symbol);
+    let currentQuote: Awaited<ReturnType<typeof marketDataService.getQuote>>;
+    try {
+      currentQuote = await marketDataService.getQuote(req.symbol);
+    } catch (err) {
+      return { error: String(err).replace("Error: ", "") };
+    }
     const currentPrice = currentQuote.price;
 
     // Build technical indicators from bars
@@ -125,7 +130,9 @@ export async function runStrategyEngine(
     const avgVolume = bars.length > 0
       ? bars.reduce((s, b) => s + b.volume, 0) / bars.length
       : 1_000_000;
-    const positionSizePct = user.riskProfile.maxPositionSizePct;
+    const riskProfile = user.riskProfile ?? { maxPositionSizePct: 5, defaultStopLossPct: 2, roiTargetMonthlyPct: 25, optionsApprovalLevel: 1 };
+    const preferences = user.preferences ?? { tipsEnabled: true, learningModeEnabled: true, aiEnabled: true };
+    const positionSizePct = riskProfile.maxPositionSizePct;
     const tradingWithTrend = currentPrice >= sma50;
 
     // Tier 1 risk (always runs — no AI needed)
@@ -141,7 +148,7 @@ export async function runStrategyEngine(
     const tier1 = calculateTier1Risk(tier1Input);
 
     const aiStatus = await aiFallbackManager.getAiStatus();
-    const useAI = aiStatus !== "unavailable" && user.preferences.aiEnabled;
+    const useAI = aiStatus !== "unavailable" && preferences.aiEnabled;
 
     let claudeOutput: ClaudeRecommendationOutput | null = null;
 
@@ -174,7 +181,7 @@ export async function runStrategyEngine(
           existingPositions: [],
         },
         strategyHistory,
-        riskProfile: user.riskProfile,
+        riskProfile,
       });
 
       try {
@@ -224,7 +231,7 @@ export async function runStrategyEngine(
       marketConditions: { spyChange30d: 0, vix, sectorPerformance: {} },
       portfolioContext: { totalEquity: 0, buyingPower: 0, existingPositions: [] },
       strategyHistory: [],
-      riskProfile: user.riskProfile,
+      riskProfile,
     });
 
     const promptHash = createHash("sha256").update(promptTemplate).digest("hex").slice(0, 16);
@@ -242,8 +249,8 @@ export async function runStrategyEngine(
         expectedReturnPct: 5,
       },
       stopLoss: claudeOutput?.stopLoss ?? {
-        price: currentPrice * (1 - user.riskProfile.defaultStopLossPct / 100),
-        maxLossPct: user.riskProfile.defaultStopLossPct,
+        price: currentPrice * (1 - riskProfile.defaultStopLossPct / 100),
+        maxLossPct: riskProfile.defaultStopLossPct,
       },
       optionDetails: claudeOutput?.optionDetails
         ? {

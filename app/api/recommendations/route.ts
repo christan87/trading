@@ -49,7 +49,8 @@ export async function POST(req: NextRequest) {
   });
 
   if ("error" in result) {
-    return NextResponse.json({ error: result.error }, { status: 500 });
+    const isInputError = result.error.includes("verify the ticker") || result.error.includes("not found");
+    return NextResponse.json({ error: result.error }, { status: isInputError ? 400 : 500 });
   }
 
   // Fetch the created recommendation to return it

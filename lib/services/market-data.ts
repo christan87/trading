@@ -97,11 +97,14 @@ export class MarketDataService {
 
   private async getAlpacaQuote(symbol: string): Promise<Quote> {
     const data = await alpacaDataFetch<{
-      quote: { ap: number; bp: number; t: string };
       trade: { p: number; s: number; t: string };
-    }>(`/v2/stocks/${symbol}/quotes/latest?feed=iex`);
+    }>(`/v2/stocks/${symbol}/trades/latest?feed=iex`);
 
-    const price = data.trade.p;
+    const price = data.trade?.p;
+    if (!price) {
+      throw new Error(`No price data for ${symbol} — verify the ticker symbol is correct`);
+    }
+
     const quote: Quote = {
       symbol,
       price,
@@ -124,6 +127,10 @@ export class MarketDataService {
     const data = await finnhubFetch<{
       c: number; h: number; l: number; o: number; pc: number; v: number; t: number;
     }>(`/quote?symbol=${symbol}`);
+
+    if (!data.c) {
+      throw new Error(`No price data for ${symbol} — verify the ticker symbol is correct`);
+    }
 
     const quote: Quote = {
       symbol,
