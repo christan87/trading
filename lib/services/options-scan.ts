@@ -9,7 +9,10 @@ import type { ScanResult } from "@/lib/db/models";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const sp500: { symbol: string; name: string; sector: string }[] = require("@/data/sp500.json");
 
-const OPTIONS_SCAN_DAILY_LIMIT = 3;
+const OPTIONS_SCAN_DAILY_LIMIT = parseInt(
+  process.env.OPTIONS_SCAN_DAILY_LIMIT ?? process.env.SCAN_DAILY_LIMIT ?? "3",
+  10
+);
 const OPTIONS_SCAN_MAX_TICKERS = 20;
 const SCAN_EXPIRY_DAYS = 7;
 
@@ -47,6 +50,83 @@ function daysToExpiration(expiration: string): number {
   );
 }
 
+// Generate estimated option contracts from price + standard strike/expiration grid.
+// Used when no options data source is available. Results are labeled as estimated.
+function generateSyntheticContracts(
+  symbol: string,
+  currentPrice: number,
+  strategy: OptionsStrategyType,
+  maxDTE: number
+): OptionsContract[] {
+  const contractType: "call" | "put" =
+    strategy === "covered_call" || strategy === "bull_call_spread" ? "call" : "put";
+
+  // Strike multipliers per strategy
+  const pcts: number[] =
+    strategy === "covered_call"   ? [1.02, 1.04, 1.05, 1.07, 1.10] :
+    strategy === "cash_secured_put" ? [0.97, 0.95, 0.93, 0.92, 0.90] :
+    strategy === "bull_call_spread" ? [0.98, 1.00, 1.02, 1.04, 1.07] :
+    /* protective_put */              [0.95, 0.93, 0.90, 0.88, 0.85];
+
+  // Round strike to nearest $1/$5/$10 depending on price range
+  const roundStrike = (s: number) =>
+    currentPrice < 50  ? Math.round(s) :
+    currentPrice < 200 ? Math.round(s / 5) * 5 :
+                         Math.round(s / 10) * 10;
+
+  // Upcoming 3rd-Friday monthly expirations (next 3 months)
+  const expirations: string[] = [];
+  const now = new Date();
+  for (let m = 1; m <= 3; m++) {
+    const first = new Date(now.getFullYear(), now.getMonth() + m, 1);
+    // First Friday of month
+    const firstFriday = ((5 - first.getDay() + 7) % 7) + 1;
+    // Third Friday
+    const thirdFriday = new Date(first.getFullYear(), first.getMonth(), firstFriday + 14);
+    const dte = Math.round((thirdFriday.getTime() - now.getTime()) / 86400_000);
+    if (dte >= 7 && dte <= maxDTE) {
+      expirations.push(thirdFriday.toISOString().split("T")[0]);
+    }
+  }
+  // Also add the next two weekly Fridays
+  const dayOfWeek = now.getDay();
+  const daysUntilFriday = (5 - dayOfWeek + 7) % 7 || 7;
+  for (let w = 0; w < 2; w++) {
+    const fri = new Date(now.getTime() + (daysUntilFriday + w * 7) * 86400_000);
+    const dte = Math.round((fri.getTime() - now.getTime()) / 86400_000);
+    if (dte >= 7 && dte <= maxDTE) {
+      expirations.push(fri.toISOString().split("T")[0]);
+    }
+  }
+
+  const uniqueExps = [...new Set(expirations)].sort();
+  const results: OptionsContract[] = [];
+
+  for (const expDate of uniqueExps) {
+    for (const pct of pcts) {
+      const strike = roundStrike(currentPrice * pct);
+      if (strike <= 0) continue;
+      results.push({
+        symbol: `${symbol}${expDate.replace(/-/g, "").slice(2)}${contractType[0].toUpperCase()}${String(strike * 1000).padStart(8, "0")}`,
+        strike_price: strike,
+        expiration_date: expDate,
+        type: contractType,
+        open_interest: 0,
+        volume: 0,
+        bid: 0,
+        ask: 0,
+        implied_volatility: null,
+        delta: null,
+        gamma: null,
+        theta: null,
+        vega: null,
+      });
+    }
+  }
+
+  return results;
+}
+
 function computeIVRank(iv: number, allIVs: number[]): number {
   if (allIVs.length === 0) return 50;
   const min = Math.min(...allIVs);
@@ -68,7 +148,8 @@ function filterByStrategy(
   return contracts.filter((c) => {
     const dte = daysToExpiration(c.expiration_date);
     if (dte > maxDTE || dte < 7) return false;
-    if (c.open_interest < minOI) return false;
+    // Skip OI filter when open_interest === 0 (Basic plan returns null → 0, meaning "data unavailable")
+    if (c.open_interest > 0 && c.open_interest < minOI) return false;
 
     const moneyness = c.strike_price / currentPrice;
 
@@ -191,10 +272,15 @@ export class OptionsScanService {
           continue;
         }
         if (result) results.push(result);
-      } catch {
-        // Skip tickers that error
+      } catch (err) {
+        console.error(`[options-scan] ${symbol} error:`, String(err));
       }
     }
+    // If results have null IV it means we used synthetic contracts (no real options data available)
+    if (!anyPlanLimited && results.some((r) => r.optionScanDetails?.impliedVolatility === null)) {
+      anyPlanLimited = true;
+    }
+    console.log(`[options-scan] ${results.length} results from ${tickers.length} tickers, planLimited=${anyPlanLimited}`);
 
     if (results.length > 0) {
       const { scanResults } = await getCollections();
@@ -243,30 +329,29 @@ export class OptionsScanService {
         ? ((closes[closes.length - 1] - closes[0]) / closes[0]) * 100
         : 0;
 
-    // Try snapshot first (includes IV/bid/ask), fall back to contracts endpoint
-    const { contracts: snapshotContracts, planLimited } =
+    // getOptionsChain tries Alpaca first, then Finnhub
+    const { contracts: apiContracts, planLimited } =
       await marketDataService.getOptionsChain(symbol);
 
-    let rawContracts: OptionsContract[];
-    if (planLimited) {
-      // Basic plan: use contracts endpoint (no IV/bid/ask)
-      const maxExpiry = new Date(Date.now() + params.maxDTE * 86400_000)
-        .toISOString()
-        .split("T")[0];
-      rawContracts = await marketDataService.getOptionsContracts(symbol, {
-        expirationBefore: maxExpiry,
-      });
-    } else {
-      rawContracts = snapshotContracts;
+    // When no real options data is available, generate estimated contracts from
+    // the standard strike/expiration grid for the strategy. Results are labeled.
+    let usedSynthetic = false;
+    let rawContracts = apiContracts;
+    if (rawContracts.length === 0) {
+      rawContracts = generateSyntheticContracts(symbol, currentPrice, params.strategyType, params.maxDTE);
+      if (rawContracts.length === 0) return "plan_limited";
+      usedSynthetic = true;
     }
 
-    if (rawContracts.length === 0) return planLimited ? "plan_limited" : null;
-
-    // Filter by strategy
+    // Filter by strategy (OI check skipped when synthetic — OI is always 0)
     const filtered = filterByStrategy(
-      rawContracts, params.strategyType, currentPrice, params.maxDTE, params.minOpenInterest
+      rawContracts, params.strategyType, currentPrice, params.maxDTE,
+      usedSynthetic ? 0 : params.minOpenInterest
     );
-    if (filtered.length === 0) return null;
+    if (filtered.length === 0) {
+      console.log(`[options-scan] ${symbol}: ${rawContracts.length} contracts (synthetic=${usedSynthetic}), 0 passed filterByStrategy (strategy=${params.strategyType}, price=${currentPrice})`);
+      return null;
+    }
 
     // Compute IV rank if we have IV data
     const allIVs = rawContracts
@@ -345,10 +430,14 @@ export class OptionsScanService {
         : null;
 
     const strategyLabel = params.strategyType.replace(/_/g, " ");
+    const syntheticNote = usedSynthetic
+      ? "Contract parameters are estimated — verify actual strike availability and pricing on your brokerage before trading. "
+      : "";
     const thesis = `${contract.type.toUpperCase()} option — ${strategyLabel} on ${symbol}. ` +
       `Strike $${contract.strike_price} expiring ${contract.expiration_date} (${dte}d). ` +
-      (ivRank !== null ? `IV rank ${ivRank}/100. ` : "IV data unavailable on current plan. ") +
-      `Score: ${best.score}/100.`;
+      (ivRank !== null ? `IV rank ${ivRank}/100. ` : "") +
+      syntheticNote +
+      `Underlying score: ${best.score}/100.`;
 
     return {
       userId: null,
@@ -393,7 +482,7 @@ export class OptionsScanService {
         risks: [
           `${dte} days to expiration`,
           ...(spreadPct !== null && spreadPct > 0.1 ? [`Wide bid-ask spread (${(spreadPct * 100).toFixed(1)}%)`] : []),
-          ...(planLimited ? ["IV and bid/ask data unavailable — Alpaca Basic plan"] : []),
+          ...(usedSynthetic ? ["Estimated contract — actual bid/ask and IV not available"] : []),
         ],
         suggestedDirection:
           params.strategyType === "covered_call" || params.strategyType === "bull_call_spread"

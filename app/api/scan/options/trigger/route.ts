@@ -9,7 +9,7 @@ export async function POST(req: NextRequest) {
   const { allowed, remaining } = await optionsScanService.checkDailyLimit();
   if (!allowed) {
     return NextResponse.json(
-      { error: "Options scan limit reached (3/day). Resets at midnight UTC.", scansRemainingToday: 0 },
+      { error: "Options scan daily limit reached. Resets at midnight UTC.", scansRemainingToday: 0 },
       { status: 429 }
     );
   }

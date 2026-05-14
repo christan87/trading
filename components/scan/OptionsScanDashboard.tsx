@@ -113,15 +113,15 @@ export function OptionsScanDashboard() {
           <div className="flex items-center gap-3">
             {data && (
               <span className={`text-xs ${REMAINING_COLORS(data.scansRemainingToday ?? 0)}`}>
-                {data.scansRemainingToday ?? 0}/3 options scans remaining today
+                {data.scansRemainingToday ?? 0} options scans remaining today
               </span>
             )}
             <button
               onClick={handleScan}
               disabled={scanning || loading || (data?.scansRemainingToday ?? 1) === 0}
-              className="text-sm bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 text-black font-semibold px-4 py-2 rounded-lg transition-colors"
+              className="text-sm bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 disabled:cursor-not-allowed text-black font-semibold px-4 py-2 rounded-lg transition-colors"
             >
-              {scanning ? "Scanning…" : "Run Options Scan"}
+              {scanning ? "Scanning…" : (data?.scansRemainingToday ?? 1) === 0 ? "Daily limit reached" : "Run Options Scan"}
             </button>
           </div>
         </div>

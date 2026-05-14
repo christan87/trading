@@ -177,11 +177,9 @@ export class MarketDataService {
 
   async getOptionsChain(
     symbol: string,
-    expiration?: string
+    _expiration?: string
   ): Promise<{ contracts: OptionsContract[]; planLimited: boolean }> {
-    const params = new URLSearchParams({ underlying_symbols: symbol, limit: "100" });
-    if (expiration) params.set("expiration_date_gte", expiration);
-
+    // Try Alpaca snapshot first (requires Algo Trader Plus plan)
     try {
       const data = await alpacaDataFetch<{
         option_contracts: {
@@ -213,56 +211,82 @@ export class MarketDataService {
         vega: c.greeks?.vega ?? null,
       }));
       return { contracts, planLimited: false };
-    } catch (err) {
-      // Alpaca Basic plan does not include options snapshots (returns 404)
-      if (String(err).includes("404")) {
-        return { contracts: [], planLimited: true };
-      }
-      throw err;
+    } catch {
+      // Alpaca Basic plan returns 403/404 — fall back to Finnhub option chain
+    }
+
+    // Finnhub fallback — free tier includes option chain with IV, bid, ask, OI
+    try {
+      const finnhubContracts = await this.getOptionsFinnhub(symbol);
+      return { contracts: finnhubContracts, planLimited: false };
+    } catch {
+      return { contracts: [], planLimited: true };
     }
   }
 
-  // Fetch basic contract listing — available on Alpaca Basic plan (no IV or bid/ask)
+  private async getOptionsFinnhub(symbol: string): Promise<OptionsContract[]> {
+    type FinnhubOptionItem = {
+      contractName: string;
+      strike: number;
+      lastPrice: number;
+      bid: number;
+      ask: number;
+      volume: number;
+      openInterest: number;
+      impliedVolatility: number;
+    };
+    type FinnhubOptionChain = {
+      data: {
+        expirationDate: string;
+        options: { CALL?: FinnhubOptionItem[]; PUT?: FinnhubOptionItem[] };
+      }[];
+    };
+
+    const data = await finnhubFetch<FinnhubOptionChain>(
+      `/stock/option-chain?symbol=${symbol}`
+    );
+
+    const results: OptionsContract[] = [];
+    const today = Date.now();
+
+    for (const exp of data.data ?? []) {
+      const expMs = new Date(exp.expirationDate).getTime();
+      if (expMs <= today) continue;
+
+      const mapItems = (items: FinnhubOptionItem[] | undefined, type: "call" | "put") => {
+        for (const c of items ?? []) {
+          results.push({
+            symbol: c.contractName,
+            strike_price: c.strike,
+            expiration_date: exp.expirationDate,
+            type,
+            open_interest: c.openInterest ?? 0,
+            volume: c.volume ?? 0,
+            bid: c.bid ?? 0,
+            ask: c.ask ?? c.lastPrice ?? 0,
+            implied_volatility: c.impliedVolatility ?? null,
+            delta: null,
+            gamma: null,
+            theta: null,
+            vega: null,
+          });
+        }
+      };
+
+      mapItems(exp.options.CALL, "call");
+      mapItems(exp.options.PUT, "put");
+    }
+
+    return results;
+  }
+
+  // Kept for backward compatibility — callers should prefer getOptionsChain
   async getOptionsContracts(
     symbol: string,
-    opts: { type?: "call" | "put"; expirationBefore?: string; limit?: number } = {}
+    _opts: { type?: "call" | "put"; expirationBefore?: string; limit?: number } = {}
   ): Promise<OptionsContract[]> {
-    const params = new URLSearchParams({
-      underlying_symbols: symbol,
-      limit: String(opts.limit ?? 200),
-    });
-    if (opts.type) params.set("type", opts.type);
-    if (opts.expirationBefore) params.set("expiration_date_lte", opts.expirationBefore);
-    params.set("expiration_date_gte", new Date().toISOString().split("T")[0]);
-
-    const data = await alpacaDataFetch<{
-      option_contracts: {
-        symbol: string;
-        strike_price: string;
-        expiration_date: string;
-        type: "call" | "put";
-        open_interest: number | null;
-        open_interest_date: string | null;
-        close_price: string | null;
-        close_price_date: string | null;
-      }[];
-    }>(`/v2/options/contracts?${params.toString()}`);
-
-    return (data.option_contracts ?? []).map((c) => ({
-      symbol: c.symbol,
-      strike_price: parseFloat(c.strike_price),
-      expiration_date: c.expiration_date,
-      type: c.type,
-      open_interest: c.open_interest ?? 0,
-      volume: 0,
-      bid: 0,
-      ask: parseFloat(c.close_price ?? "0"),
-      implied_volatility: null,
-      delta: null,
-      gamma: null,
-      theta: null,
-      vega: null,
-    }));
+    const { contracts } = await this.getOptionsChain(symbol);
+    return contracts;
   }
 
   async getCompanyProfile(symbol: string): Promise<{
