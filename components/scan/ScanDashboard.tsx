@@ -6,7 +6,7 @@ import { ScanResultCard } from "./ScanResultCard";
 import { ScanFilters, type ScanFilterState } from "./ScanFilters";
 
 interface RunMeta {
-  runId: string;
+  scanId: string;
   scannedAt: string;
   count: number;
 }
@@ -14,6 +14,7 @@ interface RunMeta {
 interface ScanData {
   results: ScanResult[];
   recentRuns: RunMeta[];
+  scansRemainingToday: number;
 }
 
 const DEFAULT_FILTERS: ScanFilterState = {
@@ -22,6 +23,9 @@ const DEFAULT_FILTERS: ScanFilterState = {
   status: "new",
   sector: "",
 };
+
+const REMAINING_COLORS = (n: number) =>
+  n >= 4 ? "text-emerald-400" : n >= 2 ? "text-yellow-400" : "text-red-400";
 
 export function ScanDashboard() {
   const [data, setData] = useState<ScanData | null>(null);
@@ -118,13 +122,20 @@ export function ScanDashboard() {
             </p>
           )}
         </div>
-        <button
-          onClick={handleTriggerScan}
-          disabled={scanning || loading}
-          className="text-sm bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 text-black font-semibold px-4 py-2 rounded-lg transition-colors"
-        >
-          {scanning ? "Scanning…" : "Run Scan"}
-        </button>
+        <div className="flex items-center gap-3">
+          {data && (
+            <span className={`text-xs ${REMAINING_COLORS(data.scansRemainingToday ?? 0)}`}>
+              {data.scansRemainingToday ?? 0}/6 scans remaining today
+            </span>
+          )}
+          <button
+            onClick={handleTriggerScan}
+            disabled={scanning || loading || (data?.scansRemainingToday ?? 1) === 0}
+            className="text-sm bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 text-black font-semibold px-4 py-2 rounded-lg transition-colors"
+          >
+            {scanning ? "Scanning…" : "Run Scan"}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -175,7 +186,7 @@ export function ScanDashboard() {
           <div className="space-y-1">
             {data.recentRuns.map((run) => (
               <div
-                key={run.runId}
+                key={run.scanId}
                 className="flex items-center justify-between text-xs text-zinc-500 py-1 border-b border-zinc-800"
               >
                 <span>

@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ObjectId } from "mongodb";
 import { getCollections } from "@/lib/db/mongodb";
+import { getRedis } from "@/lib/utils/redis";
 import { newsService } from "@/lib/services/news";
 import { congressService } from "@/lib/services/congress";
 import type { ScanResult, NewsEvent } from "@/lib/db/models";
@@ -17,6 +18,9 @@ import {
 const sp500: { symbol: string; name: string; sector: string }[] = require("@/data/sp500.json");
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+const SCAN_DAILY_LIMIT = 6;
+const SCAN_EXPIRY_DAYS = 7;
 
 interface SectorImpact {
   sector: string;
@@ -35,7 +39,6 @@ function computeTier1Risk(params: {
 
   if (params.congressCluster) {
     const { purchases, sales } = params.congressCluster;
-    // High congressional activity = elevated uncertainty
     if (purchases + sales >= 5) score += 2;
     else if (purchases + sales >= 3) score += 1;
   }
@@ -59,52 +62,94 @@ function categorizeArticle(article: NewsEvent): ScanResult["newsHeadlines"][numb
   };
 }
 
+function todayKey(): string {
+  return `scan:daily_count:${new Date().toISOString().split("T")[0]}`;
+}
+
 export interface ScanRunSummary {
-  runId: string;
+  scanId: string;
   candidatesFound: number;
   sectorsImpacted: string[];
   scannedAt: Date;
+  rateLimited?: boolean;
+  scansRemainingToday?: number;
 }
 
 export class MarketScanService {
-  async runScan(): Promise<ScanRunSummary> {
-    const runId = new ObjectId().toHexString();
-    const scannedAt = new Date();
+  async checkDailyLimit(): Promise<{ allowed: boolean; remaining: number }> {
+    const redis = getRedis();
+    const key = todayKey();
+    const count = await redis.get<number>(key) ?? 0;
+    return { allowed: count < SCAN_DAILY_LIMIT, remaining: SCAN_DAILY_LIMIT - count };
+  }
 
-    // Step 1: Fetch recent political/regulatory/geopolitical news (no user token needed — general market news)
+  private async incrementDailyCount(): Promise<void> {
+    const redis = getRedis();
+    const key = todayKey();
+    const current = await redis.get<number>(key) ?? 0;
+    // Expires at end of day (86400s)
+    await redis.set(key, current + 1, { ex: 86400 });
+  }
+
+  async runScan(triggerType: ScanResult["triggerType"] = "manual"): Promise<ScanRunSummary> {
+    const { allowed, remaining } = await this.checkDailyLimit();
+    if (!allowed) {
+      return {
+        scanId: "",
+        candidatesFound: 0,
+        sectorsImpacted: [],
+        scannedAt: new Date(),
+        rateLimited: true,
+        scansRemainingToday: 0,
+      };
+    }
+
+    await this.incrementDailyCount();
+
+    const scanId = new ObjectId().toHexString();
+    const scannedAt = new Date();
+    const expiresAt = new Date(Date.now() + SCAN_EXPIRY_DAYS * 86400_000);
+
+    // Step 1: Fetch recent political/regulatory/geopolitical news
     const politicalArticles = await this.fetchPoliticalNews();
 
     if (politicalArticles.length === 0) {
-      return { runId, candidatesFound: 0, sectorsImpacted: [], scannedAt };
+      return { scanId, candidatesFound: 0, sectorsImpacted: [], scannedAt, scansRemainingToday: remaining - 1 };
     }
+
+    // Build a human-readable trigger summary from the most recent article
+    const topArticle = politicalArticles[0];
+    const triggerSummary = topArticle
+      ? `${topArticle.category.charAt(0).toUpperCase() + topArticle.category.slice(1)} event: ${topArticle.headline.slice(0, 120)}`
+      : "Scan triggered by recent political/regulatory news";
 
     // Step 2: Claude Sonnet classifies which sectors are impacted
     const sectorImpacts = await this.classifySectors(politicalArticles);
     if (sectorImpacts.length === 0) {
-      return { runId, candidatesFound: 0, sectorsImpacted: [], scannedAt };
+      return { scanId, candidatesFound: 0, sectorsImpacted: [], scannedAt, scansRemainingToday: remaining - 1 };
     }
 
     const impactedSectorNames = [...new Set(sectorImpacts.map((s) => s.sector))];
 
-    // Step 3: Find S&P 500 candidates in impacted sectors
-    const candidates = sp500.filter((stock) =>
-      impactedSectorNames.includes(stock.sector)
-    );
+    // Step 3: Find S&P 500 candidates in impacted sectors (max 20)
+    const candidates = sp500
+      .filter((stock) => impactedSectorNames.includes(stock.sector))
+      .slice(0, 20);
 
-    // Limit to top 20 candidates to stay within rate limits
-    const topCandidates = candidates.slice(0, 20);
-
-    // Step 4: For each candidate, gather congress cluster + recent news + run Claude Opus analysis
+    // Step 4: For each candidate, gather congress cluster + recent news + Claude Opus analysis
     const results: Omit<ScanResult, "_id">[] = [];
 
-    for (const candidate of topCandidates) {
+    for (const candidate of candidates) {
       try {
         const result = await this.analyzeCandidate(
           candidate,
           sectorImpacts,
           politicalArticles,
-          runId,
-          scannedAt
+          scanId,
+          triggerType,
+          triggerSummary,
+          scannedAt,
+          expiresAt
         );
         if (result) results.push(result);
       } catch {
@@ -119,16 +164,17 @@ export class MarketScanService {
     }
 
     return {
-      runId,
+      scanId,
       candidatesFound: results.length,
       sectorsImpacted: impactedSectorNames,
       scannedAt,
+      scansRemainingToday: remaining - 1,
     };
   }
 
   private async fetchPoliticalNews(): Promise<NewsEvent[]> {
     const { news } = await getCollections();
-    const since = new Date(Date.now() - 3 * 86400_000); // last 3 days
+    const since = new Date(Date.now() - 3 * 86400_000);
     return news
       .find({
         category: { $in: ["political", "regulatory", "geopolitical"] },
@@ -170,13 +216,15 @@ export class MarketScanService {
     candidate: { symbol: string; name: string; sector: string },
     sectorImpacts: SectorImpact[],
     allArticles: NewsEvent[],
-    runId: string,
-    scannedAt: Date
+    scanId: string,
+    triggerType: ScanResult["triggerType"],
+    triggerSummary: string,
+    scannedAt: Date,
+    expiresAt: Date
   ): Promise<Omit<ScanResult, "_id"> | null> {
     const sectorMatch = sectorImpacts.find((s) => s.sector === candidate.sector);
     if (!sectorMatch) return null;
 
-    // Build triggers from sector impact
     const triggers: ScanResult["triggers"] = [
       {
         type: sectorMatch.triggerType,
@@ -187,10 +235,8 @@ export class MarketScanService {
       },
     ];
 
-    // Get congress cluster for this symbol
     const congressCluster = await this.getCongressCluster(candidate.symbol);
 
-    // Add congress trigger if bullish/bearish cluster exists
     if (congressCluster && congressCluster.direction !== "neutral") {
       triggers.push({
         type: "congress_trade",
@@ -201,14 +247,11 @@ export class MarketScanService {
       });
     }
 
-    // Get symbol-specific news headlines from the article pool
     const symbolNews = allArticles
       .filter((a) => a.tickers.includes(candidate.symbol))
       .map(categorizeArticle);
 
-    // Add general sector news (not symbol-specific)
-    const relevantArticleIndices = sectorMatch.articleIndices ?? [];
-    const sectorArticles = relevantArticleIndices
+    const sectorArticles = (sectorMatch.articleIndices ?? [])
       .map((i) => allArticles[i])
       .filter(Boolean)
       .map(categorizeArticle);
@@ -216,7 +259,6 @@ export class MarketScanService {
     const newsHeadlines = [...symbolNews, ...sectorArticles].slice(0, 10);
     const riskScore = computeTier1Risk({ congressCluster, newsHeadlines });
 
-    // Only analyze with Claude if triggers are meaningful
     const maxRelevance = Math.max(...triggers.map((t) => t.relevanceScore));
     if (maxRelevance < 0.4) return null;
 
@@ -230,25 +272,50 @@ export class MarketScanService {
       riskScore,
     });
 
-    // Skip low-confidence results
     if (!aiAnalysis || aiAnalysis.confidence < 30) return null;
 
-    const triggerTypes = [...new Set(triggers.map((t) => t.type))];
-    const primaryTrigger = triggerTypes[0] ?? "political_event";
+    const primaryTriggerType = [...new Set(triggers.map((t) => t.type))][0] ?? "political_event";
+
+    // Derive impact level and timeframe from confidence and trigger type
+    const expectedImpact: ScanResult["expectedImpact"] =
+      aiAnalysis.confidence >= 70 ? "high" : aiAnalysis.confidence >= 50 ? "moderate" : "low";
+
+    const impactTimeframe: ScanResult["impactTimeframe"] =
+      aiAnalysis.suggestedTimeframe === "intraday"
+        ? "days"
+        : aiAnalysis.suggestedTimeframe === "swing"
+        ? "weeks"
+        : "months";
+
+    const direction: ScanResult["direction"] =
+      aiAnalysis.suggestedDirection === "long"
+        ? "bullish"
+        : aiAnalysis.suggestedDirection === "short"
+        ? "bearish"
+        : "neutral";
 
     return {
-      runId,
+      userId: null,
+      scanId,
+      triggerType,
+      triggerSummary,
       symbol: candidate.symbol,
       companyName: candidate.name,
       sector: candidate.sector,
-      triggerType: primaryTrigger,
+      industry: candidate.sector, // default to sector; can be enriched via Finnhub profile later
       triggers,
+      entryRange: null, // populated when user promotes to full recommendation
+      expectedImpact,
+      impactTimeframe,
+      direction,
       congressCluster,
       newsHeadlines,
       aiAnalysis,
       riskScore,
       status: "new",
+      promotedToRecommendationId: null,
       scannedAt,
+      expiresAt,
     };
   }
 
@@ -301,15 +368,18 @@ export class MarketScanService {
   async getLatestResults(limit = 20): Promise<ScanResult[]> {
     const { scanResults } = await getCollections();
     return scanResults
-      .find({ status: { $ne: "dismissed" } })
+      .find({ status: { $ne: "dismissed" }, expiresAt: { $gt: new Date() } })
       .sort({ scannedAt: -1 })
       .limit(limit)
       .toArray();
   }
 
-  async getResultsByRunId(runId: string): Promise<ScanResult[]> {
+  async getResultsByScanId(scanId: string): Promise<ScanResult[]> {
     const { scanResults } = await getCollections();
-    return scanResults.find({ runId }).sort({ riskScore: 1, "aiAnalysis.confidence": -1 }).toArray();
+    return scanResults
+      .find({ scanId })
+      .sort({ riskScore: 1, "aiAnalysis.confidence": -1 })
+      .toArray();
   }
 
   async updateStatus(id: string, status: ScanResult["status"]): Promise<void> {
@@ -317,16 +387,30 @@ export class MarketScanService {
     await scanResults.updateOne({ _id: new ObjectId(id) }, { $set: { status } });
   }
 
-  async getRecentRunIds(limit = 5): Promise<{ runId: string; scannedAt: Date; count: number }[]> {
+  async promoteToRecommendation(id: string, recommendationId: string): Promise<void> {
+    const { scanResults } = await getCollections();
+    await scanResults.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status: "promoted", promotedToRecommendationId: new ObjectId(recommendationId) } }
+    );
+  }
+
+  async getRecentRunIds(limit = 5): Promise<{ scanId: string; scannedAt: Date; count: number }[]> {
     const { scanResults } = await getCollections();
     const pipeline = [
       { $sort: { scannedAt: -1 } },
-      { $group: { _id: "$runId", scannedAt: { $first: "$scannedAt" }, count: { $sum: 1 } } },
+      { $group: { _id: "$scanId", scannedAt: { $first: "$scannedAt" }, count: { $sum: 1 } } },
       { $sort: { scannedAt: -1 } },
       { $limit: limit },
-      { $project: { runId: "$_id", scannedAt: 1, count: 1, _id: 0 } },
+      { $project: { scanId: "$_id", scannedAt: 1, count: 1, _id: 0 } },
     ];
-    return scanResults.aggregate<{ runId: string; scannedAt: Date; count: number }>(pipeline).toArray();
+    return scanResults.aggregate<{ scanId: string; scannedAt: Date; count: number }>(pipeline).toArray();
+  }
+
+  async deleteExpired(): Promise<number> {
+    const { scanResults } = await getCollections();
+    const result = await scanResults.deleteMany({ expiresAt: { $lt: new Date() } });
+    return result.deletedCount;
   }
 }
 

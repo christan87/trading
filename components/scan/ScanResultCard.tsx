@@ -7,17 +7,21 @@ interface Props {
   onStatusChange: (id: string, status: ScanResult["status"]) => void;
 }
 
-const TRIGGER_LABELS: Record<ScanResult["triggerType"], string> = {
+const TRIGGER_LABELS: Record<string, string> = {
   political_event: "Political",
+  congress_cluster: "Congress",
   congress_trade: "Congress",
   contract_award: "Contract",
+  manual: "Manual",
   regulatory: "Regulatory",
 };
 
-const TRIGGER_COLORS: Record<ScanResult["triggerType"], string> = {
+const TRIGGER_COLORS: Record<string, string> = {
   political_event: "bg-purple-900/40 text-purple-300",
+  congress_cluster: "bg-blue-900/40 text-blue-300",
   congress_trade: "bg-blue-900/40 text-blue-300",
   contract_award: "bg-green-900/40 text-green-300",
+  manual: "bg-zinc-800 text-zinc-400",
   regulatory: "bg-orange-900/40 text-orange-300",
 };
 
@@ -45,9 +49,9 @@ export function ScanResultCard({ result, onStatusChange }: Props) {
   const { aiAnalysis } = result;
 
   const statusBadge =
-    result.status === "reviewed"
+    result.status === "viewed"
       ? "border-zinc-600 text-zinc-400"
-      : result.status === "acted"
+      : result.status === "promoted"
       ? "border-emerald-600 text-emerald-400"
       : "border-zinc-700 text-zinc-500";
 
@@ -166,13 +170,13 @@ export function ScanResultCard({ result, onStatusChange }: Props) {
       )}
 
       {/* Actions */}
-      {result.status === "new" && (
+      {(result.status === "new" || result.status === "viewed") && (
         <div className="flex gap-2 pt-1">
           <button
-            onClick={() => onStatusChange(id, "reviewed")}
+            onClick={() => onStatusChange(id, "viewed")}
             className="flex-1 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-3 py-1.5 rounded-lg transition-colors"
           >
-            Mark Reviewed
+            Mark Viewed
           </button>
           <button
             onClick={() => onStatusChange(id, "dismissed")}
@@ -182,6 +186,7 @@ export function ScanResultCard({ result, onStatusChange }: Props) {
           </button>
           <a
             href={`/dashboard?symbol=${result.symbol}`}
+            onClick={() => onStatusChange(id, "promoted")}
             className="flex-1 text-xs text-center bg-yellow-500 hover:bg-yellow-400 text-black font-semibold px-3 py-1.5 rounded-lg transition-colors"
           >
             Analyze

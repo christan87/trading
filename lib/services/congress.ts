@@ -47,11 +47,13 @@ export class CongressService {
         party: (item.party?.charAt(0).toUpperCase() as "D" | "R" | "I") ?? "I",
         state: item.state ?? "",
         symbol: item.symbol,
+        assetType: "stock",
         transactionType: item.transaction?.toLowerCase().includes("purchase") ? "purchase" : "sale",
         amountRange: item.amount,
         tradeDate,
         filingDate,
         reportingGapDays,
+        committees: [],
         sourceApi: "finnhub",
         ingestedAt: new Date(),
       };

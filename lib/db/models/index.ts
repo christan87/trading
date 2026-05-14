@@ -175,6 +175,12 @@ export interface NewsEvent {
   tickers: string[];
   category: "political" | "earnings" | "macro" | "sector" | "regulatory" | "geopolitical";
   sentiment: "positive" | "negative" | "neutral" | null;
+  historicalAnalogs: {
+    eventDescription: string;
+    date: Date;
+    marketImpact: string;
+    relevanceScore: number;
+  }[] | null;
   publishedAt: Date;
   ingestedAt: Date;
 }
@@ -186,11 +192,13 @@ export interface CongressTrade {
   party: "D" | "R" | "I";
   state: string;
   symbol: string;
+  assetType: string;
   transactionType: "purchase" | "sale";
   amountRange: string;
   tradeDate: Date;
   filingDate: Date;
   reportingGapDays: number;
+  committees: string[];
   sourceApi: string;
   ingestedAt: Date;
 }
@@ -282,18 +290,30 @@ export interface PriceSnapshot {
 
 export interface ScanResult {
   _id: ObjectId;
-  runId: string; // groups all results from a single scan run
+  userId: ObjectId | null;           // null for system-triggered scans
+  scanId: string;                    // groups all results from a single scan run
+  triggerType: "political_event" | "congress_cluster" | "manual" | "regulatory";
+  triggerSummary: string;            // human-readable: e.g., "Infrastructure bill passed"
   symbol: string;
   companyName: string;
   sector: string;
-  triggerType: "political_event" | "congress_trade" | "contract_award" | "regulatory";
+  industry: string;
   triggers: {
     type: "political_event" | "congress_trade" | "contract_award" | "regulatory";
     description: string;
     date: Date;
     source: string;
-    relevanceScore: number; // 0-1
+    relevanceScore: number;          // 0-1
   }[];
+  entryRange: {
+    min: number;                     // support level / ideal entry
+    max: number;                     // resistance level / max acceptable entry
+    currentPrice: number;            // price at scan time
+    rationale: string;
+  } | null;
+  expectedImpact: "high" | "moderate" | "low";
+  impactTimeframe: "days" | "weeks" | "months";
+  direction: "bullish" | "bearish" | "neutral";
   congressCluster: {
     purchases: number;
     sales: number;
@@ -308,15 +328,17 @@ export interface ScanResult {
     category: string;
   }[];
   aiAnalysis: {
-    thesis: string; // why this is an opportunity
+    thesis: string;
     catalysts: string[];
     risks: string[];
     suggestedDirection: "long" | "short" | "watch";
     suggestedTimeframe: "intraday" | "swing" | "position";
-    confidence: number; // 0-100
+    confidence: number;              // 0-100
     disclaimer: string;
   } | null;
-  riskScore: number; // 1-10, Tier 1 rules-based
-  status: "new" | "reviewed" | "dismissed" | "acted";
+  riskScore: number;                 // 1-10, Tier 1 rules-based
+  status: "new" | "viewed" | "promoted" | "dismissed";
+  promotedToRecommendationId: ObjectId | null;  // set when user promotes to full recommendation
   scannedAt: Date;
+  expiresAt: Date;                   // scan results expire after 7 days
 }

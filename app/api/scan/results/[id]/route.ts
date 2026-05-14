@@ -18,7 +18,7 @@ export async function PATCH(
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const validStatuses: ScanResult["status"][] = ["new", "reviewed", "dismissed", "acted"];
+  const validStatuses: ScanResult["status"][] = ["new", "viewed", "promoted", "dismissed"];
   if (!validStatuses.includes(body.status)) {
     return NextResponse.json({ error: "Invalid status" }, { status: 400 });
   }

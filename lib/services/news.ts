@@ -91,6 +91,7 @@ export class NewsService {
             tickers: item.symbols,
             category: inferCategory(item.headline),
             sentiment: inferSentiment(item.headline + " " + item.summary),
+            historicalAnalogs: null,
             publishedAt: new Date(item.created_at),
             ingestedAt: new Date(),
           });
@@ -120,6 +121,7 @@ export class NewsService {
             tickers: [symbol],
             category: inferCategory(item.headline),
             sentiment,
+            historicalAnalogs: null,
             publishedAt: new Date(item.datetime * 1000),
             ingestedAt: new Date(),
           });
@@ -206,6 +208,7 @@ export class NewsService {
             ? "positive"
             : "negative"
           : inferSentiment(item.headline),
+        historicalAnalogs: null,
         publishedAt: new Date(item.datetime * 1000),
         ingestedAt: new Date(),
       };

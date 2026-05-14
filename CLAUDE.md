@@ -7,6 +7,12 @@
 
 ---
 
+## Regulatory Notice
+
+This application is a **personal decision-support tool**. It does not constitute a robo-advisor, investment advisor, or broker-dealer. All trade decisions rest with the user. Features that approach investment advice territory (strategy recommendations, ROI targeting, automated trade signals) must display prominent disclaimers: *"This is an AI-generated analysis for informational purposes only. It is not investment advice. Past performance does not guarantee future results."* No feature in this application should auto-execute trades without explicit user confirmation. Never use language like "guaranteed", "proven", or "will make money" in any AI output, UI copy, or code comments.
+
+---
+
 ## Project overview
 
 A personal stock and options trading assistant that connects to Alpaca Markets, provides AI-powered trade recommendations via Claude API, tracks strategy performance, monitors congressional trading activity, and teaches the user trading concepts through an integrated learning system.
@@ -28,17 +34,20 @@ A personal stock and options trading assistant that connects to Alpaca Markets, 
 | Brokerage | Alpaca Markets API v2 | Paper trading first, live later |
 | Auth | NextAuth.js + Alpaca OAuth2 | Brokerage connection, session mgmt |
 | Styling | Tailwind CSS | Utility-first, dark mode support |
+| Deployment | Vercel (frontend) + Railway or Render (workers) | Vercel handles the Next.js app; long-running BullMQ workers need a persistent process host |
 
 ### External APIs (free-first approach)
 
-| Service | Provider | Cost | Rate Limit |
-|---------|----------|------|-----------|
-| Market data (primary) | Alpaca Basic Plan | $0 | 200 req/min, IEX only |
-| Market data (supplementary) | Finnhub | $0 | 60 req/min, WebSocket 50 symbols |
-| Financial news | Alpaca News + Finnhub News | $0 | Bundled / 60 req/min |
-| Congressional trades | Finnhub | $0 | 60 req/min |
-| Macro indicators | FRED | $0 | 120 req/min |
-| AI engine | Claude API | ~$15-30/mo | Per-token pricing |
+| Service | Provider | Cost | Rate Limit | Upgrade To |
+|---------|----------|------|-----------|-----------|
+| Market data (primary) | Alpaca Basic Plan | $0 | 200 req/min, IEX only | Algo Trader Plus ($99/mo) for live trading |
+| Market data (supplementary) | Finnhub | $0 | 60 req/min, WebSocket 50 symbols | — |
+| Financial news | Alpaca News + Finnhub News | $0 | Bundled / 60 req/min | Benzinga Pro ($99/mo) in Phase 2 for earnings calendars |
+| Congressional trades | Finnhub | $0 | 60 req/min | Quiver Quantitative ($25/mo) in Phase 3 for committee filtering |
+| Macro indicators | FRED | $0 | 120 req/min | — (no paid upgrade needed) |
+| AI engine | Claude API | ~$15-30/mo | Per-token pricing | — |
+
+**Principle: don't pay for data you're not using yet.** The free stack is sufficient for the full MVP. See `claude files/free-vs-paid-comparison.md` for detailed trade-off analysis.
 
 ---
 
@@ -313,6 +322,12 @@ interface NewsEvent {
   tickers: string[];
   category: "political" | "earnings" | "macro" | "sector" | "regulatory" | "geopolitical";
   sentiment: "positive" | "negative" | "neutral" | null;
+  historicalAnalogs: {              // populated by Claude in Phase 2 political correlation feature
+    eventDescription: string;
+    date: Date;
+    marketImpact: string;
+    relevanceScore: number;
+  }[] | null;
   publishedAt: Date;
   ingestedAt: Date;
 }
@@ -328,11 +343,13 @@ interface CongressTrade {
   party: "D" | "R" | "I";
   state: string;
   symbol: string;
+  assetType: string;                 // e.g., "stock", "option", "etf"
   transactionType: "purchase" | "sale";
   amountRange: string;
   tradeDate: Date;
   filingDate: Date;
   reportingGapDays: number;
+  committees: string[];              // member's committee assignments (Phase 3: committee-based signals)
   sourceApi: string;
   ingestedAt: Date;
 }
@@ -552,6 +569,7 @@ Create an `AiFallbackManager` service that:
 - **Market data:** WebSocket `wss://stream.data.alpaca.markets` (IEX on free tier), REST for historical bars
 - **Options:** `GET /v2/options/contracts` for chain lookup, same order endpoints for options orders
 - **Rate limit:** 200 req/min trading, track in Redis, queue excess
+- **MCP Server:** Alpaca has an official MCP Server v2 (61 tool endpoints) useful during development for validating API shapes. For the MVP, use the REST API directly. Evaluate MCP for the agentic workflow in Phase 2+. See `claude files/claude-code-tooling-guide.md` for setup.
 
 ### Finnhub
 
@@ -678,6 +696,31 @@ Execute in this order. Each phase should be fully functional before starting the
 31. Congressional trade pattern detection (cluster buys, committee analysis)
 32. Adaptive strategy learning (Claude feedback loop on losing strategies)
 33. AI-generated learning cards based on user trading activity
+
+---
+
+## Claude Code tooling
+
+See `claude files/claude-code-tooling-guide.md` for the full setup guide. Summary:
+
+- **`.mcp.json`** (project root) — configures MCP servers: Alpaca (API validation), Sequential Thinking (complex logic), Context7 (live library docs)
+- **`.claude/rules/trading-app.md`** — project-wide rules loaded on every session (regulatory, architecture, security, testing constraints)
+- Use **Context7 MCP** before any session touching Next.js 15, BullMQ, NextAuth v5, or `@anthropic-ai/sdk` to get current docs
+- Use **Sequential Thinking MCP** for the risk assessor, SM-2 algorithm, scan pipeline, and prompt design
+- Use **Vitest** for unit tests (not Jest). Tests required for: `risk-assessor.ts`, `learning.ts`, `encryption.ts`, `rate-limiter.ts`
+- All Claude API responses must be validated with **Zod** schemas before use
+
+---
+
+## Top architectural risks
+
+| Risk | Impact | Mitigation |
+|------|--------|-----------|
+| Claude API latency in critical path | High | All AI calls via BullMQ — never in the sync request path. 30s timeout, 3 retries, exponential backoff, dead-letter queue. |
+| Strategy performance displays false confidence | High (liability) | Show sample size alongside every stat. Require ≥30 closed decisions before showing aggregates. Show confidence intervals. |
+| Alpaca paper trading diverges from live | Medium | Track paper vs. live performance separately. Warn user when switching. Include slippage estimate in recommendations. |
+| Prompt injection via market data or news | Medium | XML-delimited blocks for all external data. System prompt instructs Claude to treat them as untrusted. Log all prompts for audit. |
+| Real-time data costs escalate | Medium | Aggressive Redis caching at every API boundary. Track call counts per provider. Dashboard for cost visibility. |
 
 ---
 

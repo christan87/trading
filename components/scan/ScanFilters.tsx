@@ -49,8 +49,8 @@ export function ScanFilters({ filters, sectors, onChange }: Props) {
         className="bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs rounded-lg px-2 py-1.5"
       >
         <option value="new">New only</option>
-        <option value="reviewed">Reviewed</option>
-        <option value="acted">Acted on</option>
+        <option value="viewed">Viewed</option>
+        <option value="promoted">Promoted</option>
         <option value="all">All statuses</option>
       </select>
 
