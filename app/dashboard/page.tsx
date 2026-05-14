@@ -7,6 +7,7 @@ import { PriceChart } from "@/components/dashboard/PriceChart";
 import { OptionsChain } from "@/components/dashboard/OptionsChain";
 import { LearningProgress } from "@/components/learning/LearningProgress";
 import { RoiTarget } from "@/components/dashboard/RoiTarget";
+import { ScanSummaryWidget } from "@/components/scan/ScanSummaryWidget";
 
 export default async function DashboardPage({
   searchParams,
@@ -21,9 +22,10 @@ export default async function DashboardPage({
   return (
     <div className="p-4 space-y-4 max-w-7xl mx-auto">
       <AccountSummary />
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <LearningProgress />
         <RoiTarget />
+        <ScanSummaryWidget />
       </div>
       <WatchList />
       <PositionsTable />

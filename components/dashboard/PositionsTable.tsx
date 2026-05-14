@@ -28,13 +28,20 @@ function usd(val: string): string {
 export function PositionsTable() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
+  const [notConnected, setNotConnected] = useState(false);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
     const load = async () => {
       try {
         const res = await fetch("/api/alpaca/positions");
-        if (!res.ok) throw new Error();
+        if (res.status === 401) { setNotConnected(true); setLoading(false); return; }
+        if (!res.ok) { setError(true); setLoading(false); return; }
         setPositions(await res.json());
+        setNotConnected(false);
+        setError(false);
+      } catch {
+        setError(true);
       } finally {
         setLoading(false);
       }
@@ -53,6 +60,19 @@ export function PositionsTable() {
         <div className="space-y-2 animate-pulse">
           {[1, 2, 3].map((i) => <div key={i} className="h-10 bg-zinc-800 rounded" />)}
         </div>
+      ) : notConnected ? (
+        <p className="text-sm text-zinc-500">
+          Connect your Alpaca account in{" "}
+          <a href="/settings" className="text-yellow-400 hover:underline">Settings</a>{" "}
+          to see positions.
+        </p>
+      ) : error ? (
+        <p className="text-sm text-zinc-500">
+          Could not load positions.{" "}
+          <a href="/settings" className="text-yellow-400 hover:underline">
+            Check your Alpaca connection.
+          </a>
+        </p>
       ) : positions.length === 0 ? (
         <p className="text-sm text-zinc-500">No open positions.</p>
       ) : (

@@ -7,6 +7,8 @@ const AlpacaProvider = {
   id: "alpaca",
   name: "Alpaca Markets",
   type: "oauth" as const,
+  // Alpaca OAuth does not support PKCE — use state-only check
+  checks: ["state"] as ["state"],
   authorization: {
     url: "https://app.alpaca.markets/oauth/authorize",
     params: {

@@ -164,6 +164,66 @@ export class NewsService {
       .limit(20)
       .toArray();
   }
+
+  async getPoliticalNews(limitDays = 3): Promise<NewsEvent[]> {
+    const { news } = await getCollections();
+    const since = new Date(Date.now() - limitDays * 86400_000);
+    return news
+      .find({
+        category: { $in: ["political", "regulatory", "geopolitical"] },
+        publishedAt: { $gte: since },
+      })
+      .sort({ publishedAt: -1 })
+      .limit(50)
+      .toArray();
+  }
+
+  async ingestGeneralMarketNews(): Promise<number> {
+    // Fetch broad market news from Finnhub (no symbol filter — general news)
+    await rateLimiter.checkAndIncrement("finnhub");
+    const res = await fetch(
+      `https://finnhub.io/api/v1/news?category=general&minId=0&token=${FINNHUB_KEY}`
+    );
+    if (!res.ok) return 0;
+
+    const items: FinnhubNewsItem[] = await res.json();
+    const { news } = await getCollections();
+    let inserted = 0;
+
+    for (const item of items.slice(0, 30)) {
+      const category = inferCategory(item.headline);
+      if (!["political", "regulatory", "geopolitical"].includes(category)) continue;
+
+      const doc: Omit<NewsEvent, "_id"> = {
+        sourceApi: "finnhub",
+        externalId: String(item.id),
+        headline: item.headline,
+        summary: item.summary || item.headline,
+        tickers: item.related ? item.related.split(",").map((s) => s.trim()).filter(Boolean) : [],
+        category,
+        sentiment: item.sentiment
+          ? item.sentiment.bullishPercent > item.sentiment.bearishPercent
+            ? "positive"
+            : "negative"
+          : inferSentiment(item.headline),
+        publishedAt: new Date(item.datetime * 1000),
+        ingestedAt: new Date(),
+      };
+
+      try {
+        await news.updateOne(
+          { externalId: doc.externalId, sourceApi: doc.sourceApi },
+          { $setOnInsert: doc },
+          { upsert: true }
+        );
+        inserted++;
+      } catch {
+        // Duplicate — skip
+      }
+    }
+
+    return inserted;
+  }
 }
 
 export const newsService = new NewsService();

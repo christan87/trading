@@ -51,11 +51,12 @@ async function alpacaDataFetch<T>(path: string, token?: string): Promise<T> {
   };
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
-  } else {
-    // Fall back to API key auth for public data endpoints
-    headers["APCA-API-KEY-ID"] = process.env.ALPACA_CLIENT_ID ?? "";
-    headers["APCA-API-SECRET-KEY"] = process.env.ALPACA_CLIENT_SECRET ?? "";
+  } else if (process.env.ALPACA_API_KEY) {
+    // Static API key auth — requires ALPACA_API_KEY + ALPACA_API_SECRET in .env.local
+    headers["APCA-API-KEY-ID"] = process.env.ALPACA_API_KEY;
+    headers["APCA-API-SECRET-KEY"] = process.env.ALPACA_API_SECRET ?? "";
   }
+  // If neither token nor API key is set, the request will 401 — handled by callers
 
   const res = await fetch(`${ALPACA_DATA_URL}${path}`, { headers });
   if (!res.ok) {

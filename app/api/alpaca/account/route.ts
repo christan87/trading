@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import { PortfolioService } from "@/lib/services/portfolio";
+import { PortfolioService, NoAlpacaTokenError } from "@/lib/services/portfolio";
 
 export async function GET() {
   const session = await auth();
@@ -13,6 +13,9 @@ export async function GET() {
     const account = await svc.getAccount();
     return NextResponse.json(account);
   } catch (err) {
+    if (err instanceof NoAlpacaTokenError) {
+      return NextResponse.json({ error: "alpaca_not_connected" }, { status: 401 });
+    }
     console.error("[api/alpaca/account]", err);
     return NextResponse.json({ error: "Failed to fetch account" }, { status: 500 });
   }

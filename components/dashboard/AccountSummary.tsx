@@ -32,14 +32,18 @@ function fmt(val: string | undefined): string {
 
 export function AccountSummary() {
   const [data, setData] = useState<AccountData | null>(null);
+  const [notConnected, setNotConnected] = useState(false);
   const [error, setError] = useState(false);
 
   useEffect(() => {
     const load = async () => {
       try {
         const res = await fetch("/api/alpaca/account");
+        if (res.status === 401) { setNotConnected(true); return; }
         if (!res.ok) throw new Error();
         setData(await res.json());
+        setNotConnected(false);
+        setError(false);
       } catch {
         setError(true);
       }
@@ -48,6 +52,22 @@ export function AccountSummary() {
     const id = setInterval(load, 30_000);
     return () => clearInterval(id);
   }, []);
+
+  if (notConnected) {
+    return (
+      <Card>
+        <div className="flex items-center justify-between">
+          <p className="text-sm text-zinc-400">Alpaca account not connected.</p>
+          <a
+            href="/settings"
+            className="text-xs bg-yellow-500 hover:bg-yellow-400 text-black font-semibold px-3 py-1.5 rounded-lg transition-colors"
+          >
+            Connect Account
+          </a>
+        </div>
+      </Card>
+    );
+  }
 
   if (error) {
     return (

@@ -279,3 +279,44 @@ export interface PriceSnapshot {
   volume: number;
   source: "alpaca" | "finnhub";
 }
+
+export interface ScanResult {
+  _id: ObjectId;
+  runId: string; // groups all results from a single scan run
+  symbol: string;
+  companyName: string;
+  sector: string;
+  triggerType: "political_event" | "congress_trade" | "contract_award" | "regulatory";
+  triggers: {
+    type: "political_event" | "congress_trade" | "contract_award" | "regulatory";
+    description: string;
+    date: Date;
+    source: string;
+    relevanceScore: number; // 0-1
+  }[];
+  congressCluster: {
+    purchases: number;
+    sales: number;
+    members: string[];
+    direction: "bullish" | "bearish" | "neutral";
+    windowDays: number;
+  } | null;
+  newsHeadlines: {
+    headline: string;
+    sentiment: "positive" | "negative" | "neutral";
+    publishedAt: Date;
+    category: string;
+  }[];
+  aiAnalysis: {
+    thesis: string; // why this is an opportunity
+    catalysts: string[];
+    risks: string[];
+    suggestedDirection: "long" | "short" | "watch";
+    suggestedTimeframe: "intraday" | "swing" | "position";
+    confidence: number; // 0-100
+    disclaimer: string;
+  } | null;
+  riskScore: number; // 1-10, Tier 1 rules-based
+  status: "new" | "reviewed" | "dismissed" | "acted";
+  scannedAt: Date;
+}

@@ -97,6 +97,39 @@ export class CongressService {
     if (sales >= 3 && sales > purchases * 2) return { signal: "bearish", purchases, sales };
     return { signal: "neutral", purchases, sales };
   }
+
+  async getSectorClusterSignals(
+    symbols: string[],
+    windowDays = 30
+  ): Promise<Map<string, { purchases: number; sales: number; members: string[] }>> {
+    const { congressTrades } = await getCollections();
+    const since = new Date(Date.now() - windowDays * 86400_000);
+    const trades = await congressTrades
+      .find({ symbol: { $in: symbols }, tradeDate: { $gte: since } })
+      .toArray();
+
+    const bySymbol = new Map<string, { purchases: number; sales: number; members: Set<string> }>();
+
+    for (const trade of trades) {
+      if (!bySymbol.has(trade.symbol)) {
+        bySymbol.set(trade.symbol, { purchases: 0, sales: 0, members: new Set() });
+      }
+      const entry = bySymbol.get(trade.symbol)!;
+      if (trade.transactionType === "purchase") entry.purchases++;
+      else entry.sales++;
+      entry.members.add(trade.memberName);
+    }
+
+    const result = new Map<string, { purchases: number; sales: number; members: string[] }>();
+    for (const [symbol, data] of bySymbol) {
+      result.set(symbol, {
+        purchases: data.purchases,
+        sales: data.sales,
+        members: [...data.members],
+      });
+    }
+    return result;
+  }
 }
 
 export const congressService = new CongressService();

@@ -92,11 +92,15 @@ async function alpacaFetch<T>(
   return res.json() as Promise<T>;
 }
 
+export class NoAlpacaTokenError extends Error {
+  constructor() { super("No Alpaca token for user"); this.name = "NoAlpacaTokenError"; }
+}
+
 async function getTokenForUser(userId: string): Promise<string> {
   const { users } = await getCollections();
   const { ObjectId } = await import("mongodb");
   const user = await users.findOne({ _id: new ObjectId(userId) });
-  if (!user?.alpacaOAuthToken) throw new Error("No Alpaca token for user");
+  if (!user?.alpacaOAuthToken) throw new NoAlpacaTokenError();
   return decrypt(user.alpacaOAuthToken);
 }
 

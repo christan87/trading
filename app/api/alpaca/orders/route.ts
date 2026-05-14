@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import { PortfolioService, type PlaceOrderParams } from "@/lib/services/portfolio";
+import { PortfolioService, NoAlpacaTokenError, type PlaceOrderParams } from "@/lib/services/portfolio";
 
 export async function GET(req: NextRequest) {
   const session = await auth();
@@ -15,6 +15,9 @@ export async function GET(req: NextRequest) {
     const orders = await svc.getOrders(status);
     return NextResponse.json(orders);
   } catch (err) {
+    if (err instanceof NoAlpacaTokenError) {
+      return NextResponse.json({ error: "alpaca_not_connected" }, { status: 401 });
+    }
     console.error("[api/alpaca/orders GET]", err);
     return NextResponse.json({ error: "Failed to fetch orders" }, { status: 500 });
   }
@@ -42,6 +45,9 @@ export async function POST(req: NextRequest) {
     const order = await svc.placeOrder(body);
     return NextResponse.json(order, { status: 201 });
   } catch (err) {
+    if (err instanceof NoAlpacaTokenError) {
+      return NextResponse.json({ error: "alpaca_not_connected" }, { status: 401 });
+    }
     console.error("[api/alpaca/orders POST]", err);
     return NextResponse.json({ error: "Failed to place order" }, { status: 500 });
   }

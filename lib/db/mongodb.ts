@@ -12,6 +12,7 @@ import type {
   Position,
   Trade,
   PriceSnapshot,
+  ScanResult,
 } from "./models";
 
 const uri = process.env.MONGODB_URI!;
@@ -56,6 +57,7 @@ export async function getCollections() {
     priceSnapshots: db.collection<PriceSnapshot>("priceSnapshots"),
     generatedLearningCards: db.collection<GeneratedLearningCard>("generatedLearningCards"),
     adaptationSuggestions: db.collection<AdaptationSuggestion>("adaptationSuggestions"),
+    scanResults: db.collection<ScanResult>("scanResults"),
   };
 }
 
@@ -78,6 +80,9 @@ export async function ensureIndexes(): Promise<void> {
   await db.collection("trades").createIndex({ userId: 1, submittedAt: -1 });
   await db.collection("generatedLearningCards").createIndex({ userId: 1, status: 1 });
   await db.collection("adaptationSuggestions").createIndex({ userId: 1, strategyType: 1, status: 1 });
+  await db.collection("scanResults").createIndex({ runId: 1, scannedAt: -1 });
+  await db.collection("scanResults").createIndex({ symbol: 1, scannedAt: -1 });
+  await db.collection("scanResults").createIndex({ status: 1, scannedAt: -1 });
 
   // Time-series collection for price snapshots
   try {
