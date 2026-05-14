@@ -1,5 +1,21 @@
 import { ObjectId } from "mongodb";
 
+export type NotificationType =
+  | "stop_loss_triggered"
+  | "scan_opportunity"
+  | "virtual_trader_update"
+  | "strategy_reeval"
+  | "position_target_hit";
+
+export interface WatchlistItem {
+  symbol: string;
+  addedAt: Date;
+  priceWhenAdded: number;
+  sourceRecommendationId: ObjectId | null;
+  sourceScanId: string | null;
+  notes: string | null;
+}
+
 export interface User {
   _id: ObjectId;
   email: string;
@@ -17,8 +33,15 @@ export interface User {
     tipsEnabled: boolean;
     learningModeEnabled: boolean;
     aiEnabled: boolean;
+    orderSizeType?: "shares" | "dollars";
+    scanSchedule?: {
+      interval: "disabled" | "6h" | "12h" | "24h" | "48h";
+      enabledTypes: ("market" | "penny" | "options")[];
+      lastRunAt?: Date;
+    };
+    notificationSettings?: Partial<Record<NotificationType, boolean>>;
   };
-  watchlist: string[]; // ticker symbols
+  watchlist: WatchlistItem[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -143,6 +166,17 @@ export interface Strategy {
     maxDrawdownPct: number;
     lastCalculatedAt: Date;
   };
+  currentVersion: number;
+  versions: {
+    versionNumber: number;
+    parameters: Record<string, unknown>;
+    performance: Strategy["performance"];
+    peakRoiPct: number;
+    avgRoiPct: number;
+    activeFrom: Date;
+    activeTo: Date;
+    updateReason: string;
+  }[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -288,11 +322,53 @@ export interface PriceSnapshot {
   source: "alpaca" | "finnhub";
 }
 
+export interface RejectedScan {
+  _id: ObjectId;
+  userId: ObjectId | null;
+  scanId: string;
+  symbol: string;
+  rejectionSource: "auto_filter" | "user_dismiss" | "low_confidence";
+  rejectionReason: string;
+  priceAtRejection: number;
+  snapshotAtRejection: {
+    priceHistory7d: number[];
+    sector: string;
+    triggerSummary: string;
+  };
+  tracking: {
+    checkpoints: {
+      date: Date;
+      price: number;
+      changePct: number;
+    }[];
+    peakGainPct: number;
+    peakLossPct: number;
+    wouldHaveBeenProfitable: boolean | null;
+  };
+  resolvedAt: Date | null;
+  createdAt: Date;
+}
+
+export interface InsiderTrade {
+  _id: ObjectId;
+  symbol: string;
+  name: string;
+  title: string;
+  transactionType: "purchase" | "sale";
+  shares: number;
+  value: number;
+  transactionPrice: number;
+  transactionDate: Date;
+  filingDate: Date;
+  sourceApi: "finnhub";
+  ingestedAt: Date;
+}
+
 export interface ScanResult {
   _id: ObjectId;
   userId: ObjectId | null;           // null for system-triggered scans
   scanId: string;                    // groups all results from a single scan run
-  triggerType: "political_event" | "congress_cluster" | "manual" | "regulatory";
+  triggerType: "political_event" | "congress_cluster" | "manual" | "regulatory" | "free_fall";
   triggerSummary: string;            // human-readable: e.g., "Infrastructure bill passed"
   symbol: string;
   companyName: string;
@@ -341,4 +417,114 @@ export interface ScanResult {
   promotedToRecommendationId: ObjectId | null;  // set when user promotes to full recommendation
   scannedAt: Date;
   expiresAt: Date;                   // scan results expire after 7 days
+  // Optional — set for options scan results
+  assetType?: "equity" | "option";
+  optionScanDetails?: {
+    contractSymbol: string;
+    contractType: "call" | "put";
+    strike: number;
+    expiration: string;
+    daysToExpiration: number;
+    impliedVolatility: number | null;
+    ivRank: number | null;           // percentile within the chain, 0-100
+    volumeOiRatio: number | null;
+    spreadPct: number | null;        // (ask-bid)/ask
+    openInterest: number;
+    optionStrategy: "covered_call" | "cash_secured_put" | "bull_call_spread" | "protective_put";
+  };
+  // Optional — set for penny stock scan results
+  pennyStockDetails?: {
+    priceChange1d: number;
+    priceChange5d: number;
+    priceChange20d: number;
+    volumeSpike: number;             // today's volume / 20-day average volume
+    avgVolume20d: number;
+    exchange: string;
+  };
+}
+
+export interface PennyStockTicker {
+  _id: ObjectId;
+  symbol: string;
+  name: string;
+  exchange: string;
+  mic: string;                       // XNAS or XNYS
+  cachedAt: Date;
+}
+
+export interface VirtualTrader {
+  _id: ObjectId;
+  userId: ObjectId;
+  strategyId: ObjectId;
+  config: {
+    virtualBalance: number;
+    targetRoiPct: number;
+    maxPositionSizePct: number;
+    isActive: boolean;
+  };
+  currentBalance: number;
+  totalReturnPct: number;
+  monthlyReturns: {
+    month: string;           // "2026-05"
+    startBalance: number;
+    endBalance: number;
+    returnPct: number;
+    tradesExecuted: number;
+    winRate: number;
+  }[];
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface VirtualPosition {
+  _id: ObjectId;
+  virtualTraderId: ObjectId;
+  symbol: string;
+  assetType: "equity" | "option";
+  side: "long" | "short";
+  entryPrice: number;
+  quantity: number;
+  currentPrice: number;
+  unrealizedPnlPct: number;
+  targetPrice: number;
+  stopLossPrice: number;
+  recommendationSnapshot: {
+    rationale: string;
+    confidence: number;
+    dataInputs: string;
+  };
+  status: "open" | "closed";
+  exitPrice: number | null;
+  exitReason: string | null;
+  realizedPnlPct: number | null;
+  openedAt: Date;
+  closedAt: Date | null;
+}
+
+export interface StopLoss {
+  _id: ObjectId;
+  userId: ObjectId;
+  positionId: string;                // Alpaca position asset_id or symbol key
+  symbol: string;
+  type: "fixed" | "trailing";
+  percentageThreshold: number;       // e.g., 30 for 30%
+  anchorPrice: number;               // trailing: high-water mark; fixed: entry price
+  entryPrice: number;
+  triggerPrice: number;              // anchorPrice * (1 - threshold/100)
+  status: "active" | "triggered" | "cancelled";
+  triggeredAt: Date | null;
+  createdAt: Date;
+}
+
+export interface AppNotification {
+  _id: ObjectId;
+  userId: ObjectId;
+  type: NotificationType;
+  title: string;
+  message: string;
+  severity: "info" | "warning" | "urgent";
+  relatedEntityType: string | null;
+  relatedEntityId: ObjectId | null;
+  read: boolean;
+  createdAt: Date;
 }

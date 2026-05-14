@@ -13,6 +13,13 @@ import type {
   Trade,
   PriceSnapshot,
   ScanResult,
+  RejectedScan,
+  InsiderTrade,
+  PennyStockTicker,
+  VirtualTrader,
+  VirtualPosition,
+  StopLoss,
+  AppNotification,
 } from "./models";
 
 const uri = process.env.MONGODB_URI!;
@@ -58,6 +65,13 @@ export async function getCollections() {
     generatedLearningCards: db.collection<GeneratedLearningCard>("generatedLearningCards"),
     adaptationSuggestions: db.collection<AdaptationSuggestion>("adaptationSuggestions"),
     scanResults: db.collection<ScanResult>("scanResults"),
+    rejectedScans: db.collection<RejectedScan>("rejectedScans"),
+    insiderTrades: db.collection<InsiderTrade>("insiderTrades"),
+    pennyStockUniverse: db.collection<PennyStockTicker>("pennyStockUniverse"),
+    virtualTraders: db.collection<VirtualTrader>("virtualTraders"),
+    virtualPositions: db.collection<VirtualPosition>("virtualPositions"),
+    stopLosses: db.collection<StopLoss>("stopLosses"),
+    notifications: db.collection<AppNotification>("notifications"),
   };
 }
 
@@ -83,6 +97,23 @@ export async function ensureIndexes(): Promise<void> {
   await db.collection("scanResults").createIndex({ runId: 1, scannedAt: -1 });
   await db.collection("scanResults").createIndex({ symbol: 1, scannedAt: -1 });
   await db.collection("scanResults").createIndex({ status: 1, scannedAt: -1 });
+  await db.collection("rejectedScans").createIndex({ symbol: 1, createdAt: -1 });
+  await db.collection("rejectedScans").createIndex({ scanId: 1 });
+  await db.collection("rejectedScans").createIndex({ resolvedAt: 1, createdAt: -1 });
+  await db.collection("insiderTrades").createIndex({ symbol: 1, transactionDate: -1 });
+  await db.collection("insiderTrades").createIndex(
+    { symbol: 1, name: 1, transactionDate: 1, transactionType: 1 },
+    { unique: true }
+  );
+  await db.collection("pennyStockUniverse").createIndex({ symbol: 1 }, { unique: true });
+  await db.collection("pennyStockUniverse").createIndex({ cachedAt: 1 });
+  await db.collection("virtualTraders").createIndex({ userId: 1, strategyId: 1 }, { unique: true });
+  await db.collection("virtualPositions").createIndex({ virtualTraderId: 1, status: 1 });
+  await db.collection("virtualPositions").createIndex({ virtualTraderId: 1, openedAt: -1 });
+  await db.collection("stopLosses").createIndex({ userId: 1, status: 1 });
+  await db.collection("stopLosses").createIndex({ positionId: 1, userId: 1 });
+  await db.collection("notifications").createIndex({ userId: 1, read: 1, createdAt: -1 });
+  await db.collection("notifications").createIndex({ createdAt: 1 }, { expireAfterSeconds: 60 * 86400 });
 
   // Time-series collection for price snapshots
   try {

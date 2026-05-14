@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { NotificationBell } from "./NotificationBell";
 
 const links = [
   { href: "/dashboard", label: "Dashboard" },
@@ -9,13 +10,14 @@ const links = [
   { href: "/strategy", label: "Strategy" },
   { href: "/decisions", label: "Decisions" },
   { href: "/learning", label: "Learning" },
+  { href: "/virtual-trader", label: "Virtual Trader" },
   { href: "/settings", label: "Settings" },
 ];
 
 export function Nav() {
   const pathname = usePathname();
   return (
-    <nav className="bg-zinc-950 border-b border-zinc-800 px-4 py-3 flex items-center gap-6">
+    <nav className="bg-zinc-950 border-b border-zinc-800 px-4 py-3 flex items-center gap-6 relative">
       <span className="text-white font-bold text-sm tracking-tight mr-4">
         Trading Assistant
         <span className="ml-2 text-xs text-yellow-500 font-normal">PAPER</span>
@@ -33,6 +35,9 @@ export function Nav() {
           {label}
         </Link>
       ))}
+      <div className="ml-auto">
+        <NotificationBell />
+      </div>
     </nav>
   );
 }

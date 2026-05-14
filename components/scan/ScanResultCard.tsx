@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { ScanResult } from "@/lib/db/models";
 
 interface Props {
@@ -14,6 +15,7 @@ const TRIGGER_LABELS: Record<string, string> = {
   contract_award: "Contract",
   manual: "Manual",
   regulatory: "Regulatory",
+  free_fall: "Free-fall",
 };
 
 const TRIGGER_COLORS: Record<string, string> = {
@@ -23,6 +25,7 @@ const TRIGGER_COLORS: Record<string, string> = {
   contract_award: "bg-green-900/40 text-green-300",
   manual: "bg-zinc-800 text-zinc-400",
   regulatory: "bg-orange-900/40 text-orange-300",
+  free_fall: "bg-red-900/40 text-red-300",
 };
 
 const DIRECTION_COLOR = {
@@ -47,6 +50,20 @@ function RiskBar({ score }: { score: number }) {
 export function ScanResultCard({ result, onStatusChange }: Props) {
   const id = (result._id as unknown as { toString(): string }).toString();
   const { aiAnalysis } = result;
+  const [watchlisted, setWatchlisted] = useState(false);
+
+  const addToWatchlist = async () => {
+    await fetch("/api/alpaca/watchlist", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: result.symbol,
+        priceWhenAdded: result.entryRange?.currentPrice ?? 0,
+        sourceScanId: result.scanId,
+      }),
+    });
+    setWatchlisted(true);
+  };
 
   const statusBadge =
     result.status === "viewed"
@@ -162,6 +179,15 @@ export function ScanResultCard({ result, onStatusChange }: Props) {
         </div>
       )}
 
+      {/* Bearish regulatory warning */}
+      {result.direction === "bearish" && (
+        <div className="bg-red-950/40 border border-red-900/50 rounded-lg p-2.5">
+          <p className="text-xs text-red-300">
+            Short positions and put options carry risk of significant loss. Short selling has theoretically unlimited loss potential.
+          </p>
+        </div>
+      )}
+
       {/* Disclaimer */}
       {aiAnalysis && (
         <p className="text-xs text-zinc-600 italic border-t border-zinc-800 pt-2">
@@ -171,7 +197,7 @@ export function ScanResultCard({ result, onStatusChange }: Props) {
 
       {/* Actions */}
       {(result.status === "new" || result.status === "viewed") && (
-        <div className="flex gap-2 pt-1">
+        <div className="flex gap-2 pt-1 flex-wrap">
           <button
             onClick={() => onStatusChange(id, "viewed")}
             className="flex-1 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-3 py-1.5 rounded-lg transition-colors"
@@ -183,6 +209,13 @@ export function ScanResultCard({ result, onStatusChange }: Props) {
             className="flex-1 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-500 px-3 py-1.5 rounded-lg transition-colors"
           >
             Dismiss
+          </button>
+          <button
+            onClick={addToWatchlist}
+            disabled={watchlisted}
+            className="flex-1 text-xs bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-300 px-3 py-1.5 rounded-lg transition-colors"
+          >
+            {watchlisted ? "Watching" : "+ Watchlist"}
           </button>
           <a
             href={`/dashboard?symbol=${result.symbol}`}

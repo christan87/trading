@@ -9,6 +9,7 @@ import { StrategyComparison } from "@/components/strategy/StrategyComparison";
 import { PoliticalCorrelation } from "@/components/strategy/PoliticalCorrelation";
 import { CongressPatterns } from "@/components/strategy/CongressPatterns";
 import { AdaptationPanel } from "@/components/strategy/AdaptationPanel";
+import { VersionHistory } from "@/components/strategy/VersionHistory";
 import { Card } from "@/components/ui/Card";
 import type { AiStatus } from "@/lib/services/ai-fallback";
 
@@ -40,7 +41,7 @@ interface RecommendationDoc {
 }
 
 const TIMEFRAMES = ["intraday", "swing", "position"] as const;
-const STRATEGIES = ["", "momentum", "mean_reversion", "earnings_play", "options_spread", "breakout"];
+const STRATEGIES = ["", "momentum", "mean_reversion", "earnings_play", "options_spread", "breakout", "penny_stock"];
 
 export default function StrategyPage() {
   const [symbol, setSymbol] = useState("");
@@ -192,6 +193,7 @@ export default function StrategyPage() {
             <CongressPatterns />
             <AdaptationPanel />
           </div>
+          <VersionHistory />
         </>
       )}
 

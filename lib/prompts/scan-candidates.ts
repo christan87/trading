@@ -8,6 +8,7 @@ export function buildCandidateAnalysisPrompt(params: {
   congressCluster: ScanResult["congressCluster"];
   newsHeadlines: ScanResult["newsHeadlines"];
   riskScore: number;
+  insiderPurchases?: { name: string; shares: number; value: number; transactionDate: Date }[];
 }): string {
   const triggersXml = params.triggers
     .map(
@@ -28,7 +29,17 @@ export function buildCandidateAnalysisPrompt(params: {
     )
     .join("\n");
 
-  return `Analyze this stock as a potential event-driven trading opportunity based on political, regulatory, and congressional signals.
+  const insiderXml =
+    params.insiderPurchases && params.insiderPurchases.length > 0
+      ? `<insider_purchases count="${params.insiderPurchases.length}">\n${params.insiderPurchases
+          .map(
+            (p) =>
+              `<purchase name="${p.name}" shares="${p.shares}" value="$${Math.round(p.value / 1000)}K" date="${p.transactionDate.toISOString().split("T")[0]}" />`
+          )
+          .join("\n")}\n</insider_purchases>`
+      : "<insider_purchases>No recent insider purchases above $25,000</insider_purchases>";
+
+  return `Analyze this stock as a potential event-driven trading opportunity based on political, regulatory, congressional, and insider signals.
 
 <symbol>${params.symbol}</symbol>
 <company>${params.companyName}</company>
@@ -40,6 +51,8 @@ ${triggersXml}
 </triggers>
 
 ${congressXml}
+
+${insiderXml}
 
 <news>
 ${newsXml}

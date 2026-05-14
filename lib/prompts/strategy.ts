@@ -29,6 +29,7 @@ export function buildStrategyPrompt(context: {
   };
   news: { headline: string; summary: string; source: string; publishedAt: string; sentiment: string | null }[];
   congressTrades: { memberName: string; party: string; transactionType: string; amountRange: string; tradeDate: string }[];
+  insiderTrades?: { name: string; shares: number; value: number; transactionDate: string }[];
   macroIndicators: Record<string, number>;
   marketConditions: { spyChange30d: number; vix: number; sectorPerformance: Record<string, number> };
   portfolioContext: { totalEquity: number; buyingPower: number; existingPositions: string[] };
@@ -62,6 +63,14 @@ ${context.congressTrades.length === 0
       .map((t) => `${t.memberName} (${t.party}): ${t.transactionType} ${t.amountRange} on ${t.tradeDate}`)
       .join("\n")}
 </congress_trades>
+
+<insider_trades>
+${!context.insiderTrades || context.insiderTrades.length === 0
+  ? "No recent insider purchases above $25,000."
+  : context.insiderTrades
+      .map((t) => `${t.name}: bought ${t.shares.toLocaleString()} shares ($${Math.round(t.value / 1000)}K) on ${t.transactionDate}`)
+      .join("\n")}
+</insider_trades>
 
 <macro>
 ${Object.entries(context.macroIndicators)

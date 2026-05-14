@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
-import { ScanDashboard } from "@/components/scan/ScanDashboard";
+import { ScanTabs } from "@/components/scan/ScanTabs";
 
 export default async function ScanPage() {
   const session = await auth();
@@ -8,7 +8,7 @@ export default async function ScanPage() {
 
   return (
     <div className="p-4 max-w-7xl mx-auto">
-      <ScanDashboard />
+      <ScanTabs />
     </div>
   );
 }

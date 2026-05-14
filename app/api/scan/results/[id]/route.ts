@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { ObjectId } from "mongodb";
 import { auth } from "@/lib/auth";
 import { marketScanService } from "@/lib/services/market-scan";
+import { rejectedScanTracker } from "@/lib/services/rejected-scan-tracker";
+import { getCollections } from "@/lib/db/mongodb";
 import type { ScanResult } from "@/lib/db/models";
 
 export async function PATCH(
@@ -10,6 +13,7 @@ export async function PATCH(
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  const userId = (session.user as { id: string }).id;
   const { id } = await params;
   let body: { status: ScanResult["status"] };
   try {
@@ -25,6 +29,24 @@ export async function PATCH(
 
   try {
     await marketScanService.updateStatus(id, body.status);
+
+    if (body.status === "dismissed") {
+      const { scanResults } = await getCollections();
+      const scanResult = await scanResults.findOne({ _id: new ObjectId(id) });
+      if (scanResult) {
+        rejectedScanTracker.recordUserDismiss({
+          scanResultId: id,
+          userId,
+          scanResult: {
+            scanId: scanResult.scanId,
+            symbol: scanResult.symbol,
+            sector: scanResult.sector,
+            triggerSummary: scanResult.triggerSummary,
+          },
+        }).catch(() => undefined);
+      }
+    }
+
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error("[api/scan/results PATCH]", err);

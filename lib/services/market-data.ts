@@ -222,6 +222,49 @@ export class MarketDataService {
     }
   }
 
+  // Fetch basic contract listing — available on Alpaca Basic plan (no IV or bid/ask)
+  async getOptionsContracts(
+    symbol: string,
+    opts: { type?: "call" | "put"; expirationBefore?: string; limit?: number } = {}
+  ): Promise<OptionsContract[]> {
+    const params = new URLSearchParams({
+      underlying_symbols: symbol,
+      limit: String(opts.limit ?? 200),
+    });
+    if (opts.type) params.set("type", opts.type);
+    if (opts.expirationBefore) params.set("expiration_date_lte", opts.expirationBefore);
+    params.set("expiration_date_gte", new Date().toISOString().split("T")[0]);
+
+    const data = await alpacaDataFetch<{
+      option_contracts: {
+        symbol: string;
+        strike_price: string;
+        expiration_date: string;
+        type: "call" | "put";
+        open_interest: number | null;
+        open_interest_date: string | null;
+        close_price: string | null;
+        close_price_date: string | null;
+      }[];
+    }>(`/v2/options/contracts?${params.toString()}`);
+
+    return (data.option_contracts ?? []).map((c) => ({
+      symbol: c.symbol,
+      strike_price: parseFloat(c.strike_price),
+      expiration_date: c.expiration_date,
+      type: c.type,
+      open_interest: c.open_interest ?? 0,
+      volume: 0,
+      bid: 0,
+      ask: parseFloat(c.close_price ?? "0"),
+      implied_volatility: null,
+      delta: null,
+      gamma: null,
+      theta: null,
+      vega: null,
+    }));
+  }
+
   async getCompanyProfile(symbol: string): Promise<{
     name: string;
     industry: string;

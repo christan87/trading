@@ -1,6 +1,8 @@
 import { auth, signIn } from "@/lib/auth";
 import { getCollections } from "@/lib/db/mongodb";
 import { ObjectId } from "mongodb";
+import { ScanSchedulePanel } from "@/components/settings/ScanSchedulePanel";
+import { NotificationSettingsPanel } from "@/components/settings/NotificationSettingsPanel";
 
 const REDIRECT_URI = `${process.env.NEXTAUTH_URL ?? "http://localhost:3000"}/api/auth/callback/alpaca`;
 const CLIENT_ID_SET = Boolean(process.env.ALPACA_CLIENT_ID);
@@ -122,6 +124,9 @@ export default async function SettingsPage() {
           </div>
         )}
       </div>
+
+      {session?.user && <ScanSchedulePanel />}
+      {session?.user && <NotificationSettingsPanel />}
 
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
         <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider mb-3">About</h2>

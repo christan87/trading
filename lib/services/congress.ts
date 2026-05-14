@@ -1,6 +1,6 @@
 import { rateLimiter } from "@/lib/utils/rate-limiter";
 import { getCollections } from "@/lib/db/mongodb";
-import type { CongressTrade } from "@/lib/db/models";
+import type { CongressTrade, InsiderTrade } from "@/lib/db/models";
 
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY ?? "";
 
@@ -129,6 +129,102 @@ export class CongressService {
         sales: data.sales,
         members: [...data.members],
       });
+    }
+    return result;
+  }
+
+  async fetchAndStoreInsiderTrades(symbol: string): Promise<number> {
+    await rateLimiter.checkAndIncrement("finnhub");
+
+    const url = `https://finnhub.io/api/v1/stock/insider-transactions?symbol=${symbol}&token=${FINNHUB_KEY}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Finnhub insider API ${res.status}`);
+
+    const raw = await res.json() as {
+      data: {
+        name: string;
+        share: number;
+        change: number;
+        filingDate: string;
+        transactionDate: string;
+        transactionCode: string;
+        transactionPrice: number;
+      }[];
+    };
+
+    const items = raw.data ?? [];
+    const MIN_VALUE = 25_000;
+    const { insiderTrades } = await getCollections();
+    let inserted = 0;
+
+    for (const item of items) {
+      if (item.transactionCode !== "P") continue;
+      const value = item.share * (item.transactionPrice || 0);
+      if (value < MIN_VALUE) continue;
+
+      const doc: Omit<InsiderTrade, "_id"> = {
+        symbol,
+        name: item.name,
+        title: "",
+        transactionType: "purchase",
+        shares: item.share,
+        value,
+        transactionPrice: item.transactionPrice,
+        transactionDate: new Date(item.transactionDate),
+        filingDate: new Date(item.filingDate),
+        sourceApi: "finnhub",
+        ingestedAt: new Date(),
+      };
+
+      try {
+        await insiderTrades.updateOne(
+          { symbol: doc.symbol, name: doc.name, transactionDate: doc.transactionDate, transactionType: doc.transactionType },
+          { $setOnInsert: doc },
+          { upsert: true }
+        );
+        inserted++;
+      } catch {
+        // Duplicate — skip
+      }
+    }
+
+    return inserted;
+  }
+
+  async getInsiderPurchases(symbol: string, limitDays = 90): Promise<InsiderTrade[]> {
+    const { insiderTrades } = await getCollections();
+    const since = new Date(Date.now() - limitDays * 86400_000);
+    return insiderTrades
+      .find({ symbol, transactionType: "purchase", transactionDate: { $gte: since } })
+      .sort({ transactionDate: -1 })
+      .limit(20)
+      .toArray();
+  }
+
+  async getInsiderCluster(
+    symbols: string[],
+    windowDays = 60
+  ): Promise<Map<string, { count: number; totalValue: number; buyers: string[] }>> {
+    const { insiderTrades } = await getCollections();
+    const since = new Date(Date.now() - windowDays * 86400_000);
+    const trades = await insiderTrades
+      .find({ symbol: { $in: symbols }, transactionType: "purchase", transactionDate: { $gte: since } })
+      .toArray();
+
+    const bySymbol = new Map<string, { count: number; totalValue: number; buyers: Set<string> }>();
+    for (const trade of trades) {
+      if (!bySymbol.has(trade.symbol)) {
+        bySymbol.set(trade.symbol, { count: 0, totalValue: 0, buyers: new Set() });
+      }
+      const entry = bySymbol.get(trade.symbol)!;
+      entry.count++;
+      entry.totalValue += trade.value;
+      entry.buyers.add(trade.name);
+    }
+
+    const result = new Map<string, { count: number; totalValue: number; buyers: string[] }>();
+    for (const [symbol, data] of bySymbol) {
+      result.set(symbol, { count: data.count, totalValue: data.totalValue, buyers: [...data.buyers] });
     }
     return result;
   }

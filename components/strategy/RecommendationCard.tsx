@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { RiskGauge } from "./RiskGauge";
+import { OrderEntryPanel } from "./OrderEntryPanel";
 
 interface RecommendationDoc {
   _id: string;
@@ -43,6 +44,8 @@ const TIMEFRAME_LABELS: Record<string, string> = { intraday: "Intraday", swing: 
 export function RecommendationCard({ rec, onDecision }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [deciding, setDeciding] = useState(false);
+  const [showOrderPanel, setShowOrderPanel] = useState(false);
+  const [orderError, setOrderError] = useState("");
 
   const handleDecision = async (action: "accepted" | "dismissed" | "modified") => {
     setDeciding(true);
@@ -56,6 +59,29 @@ export function RecommendationCard({ rec, onDecision }: Props) {
     } finally {
       setDeciding(false);
     }
+  };
+
+  const handleOrderSubmit = async (qty: number) => {
+    setOrderError("");
+    const res = await fetch("/api/alpaca/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: rec.symbol,
+        qty,
+        side: rec.direction === "long" ? "buy" : "sell",
+        type: "limit",
+        time_in_force: "day",
+        limit_price: rec.entry.price,
+      }),
+    });
+    if (!res.ok) {
+      const d = await res.json();
+      throw new Error(d.error ?? "Order failed");
+    }
+    // Log the decision as accepted after order is placed
+    await handleDecision("accepted");
+    setShowOrderPanel(false);
   };
 
   const aiUnavailable = rec.risk.combined.weightDataDriven === 0;
@@ -152,10 +178,10 @@ export function RecommendationCard({ rec, onDecision }: Props) {
       </p>
 
       {/* Actions */}
-      {rec.outcome.status === "pending" && (
+      {rec.outcome.status === "pending" && !showOrderPanel && (
         <div className="flex gap-2 flex-wrap">
           <button
-            onClick={() => handleDecision("accepted")}
+            onClick={() => setShowOrderPanel(true)}
             disabled={deciding}
             className="flex-1 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-sm font-medium py-2 px-4 rounded-lg transition-colors"
           >
@@ -169,6 +195,26 @@ export function RecommendationCard({ rec, onDecision }: Props) {
             Dismiss
           </button>
         </div>
+      )}
+
+      {/* Order entry panel */}
+      {rec.outcome.status === "pending" && showOrderPanel && (
+        <>
+          {orderError && <p className="text-xs text-red-400">{orderError}</p>}
+          <OrderEntryPanel
+            symbol={rec.symbol}
+            side={rec.direction === "long" ? "buy" : "sell"}
+            currentPrice={rec.entry.price}
+            assetType={rec.assetType}
+            contractPrice={
+              rec.assetType === "option" && rec.optionDetails
+                ? rec.entry.price
+                : undefined
+            }
+            onSubmit={handleOrderSubmit}
+            onCancel={() => setShowOrderPanel(false)}
+          />
+        </>
       )}
       {rec.outcome.status === "tracking" && (
         <div className="flex items-center gap-2">

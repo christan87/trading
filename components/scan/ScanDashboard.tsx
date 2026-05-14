@@ -3,7 +3,8 @@
 import { useEffect, useState, useCallback } from "react";
 import type { ScanResult } from "@/lib/db/models";
 import { ScanResultCard } from "./ScanResultCard";
-import { ScanFilters, type ScanFilterState } from "./ScanFilters";
+import { ScanFilters, applyFilters, DEFAULT_SCAN_FILTERS, type ScanFilterState } from "./ScanFilters";
+import { RejectionAccuracy } from "./RejectionAccuracy";
 
 interface RunMeta {
   scanId: string;
@@ -17,13 +18,6 @@ interface ScanData {
   scansRemainingToday: number;
 }
 
-const DEFAULT_FILTERS: ScanFilterState = {
-  triggerType: "all",
-  direction: "all",
-  status: "new",
-  sector: "",
-};
-
 const REMAINING_COLORS = (n: number) =>
   n >= 4 ? "text-emerald-400" : n >= 2 ? "text-yellow-400" : "text-red-400";
 
@@ -31,8 +25,9 @@ export function ScanDashboard() {
   const [data, setData] = useState<ScanData | null>(null);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
-  const [filters, setFilters] = useState<ScanFilterState>(DEFAULT_FILTERS);
+  const [filters, setFilters] = useState<ScanFilterState>(DEFAULT_SCAN_FILTERS);
   const [error, setError] = useState<string | null>(null);
+  const [buyingPower, setBuyingPower] = useState<number | undefined>(undefined);
 
   const load = useCallback(async () => {
     try {
@@ -52,6 +47,10 @@ export function ScanDashboard() {
 
   useEffect(() => {
     load();
+    fetch("/api/alpaca/account")
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => { if (d?.buying_power) setBuyingPower(parseFloat(d.buying_power)); })
+      .catch(() => undefined);
   }, [load]);
 
   const handleTriggerScan = async () => {
@@ -92,14 +91,7 @@ export function ScanDashboard() {
   };
 
   const sectors = [...new Set((data?.results ?? []).map((r) => r.sector))].sort();
-
-  const filtered = (data?.results ?? []).filter((r) => {
-    if (filters.triggerType !== "all" && r.triggerType !== filters.triggerType) return false;
-    if (filters.direction !== "all" && r.aiAnalysis?.suggestedDirection !== filters.direction) return false;
-    if (filters.status !== "all" && r.status !== filters.status) return false;
-    if (filters.sector && r.sector !== filters.sector) return false;
-    return true;
-  });
+  const filtered = applyFilters(data?.results ?? [], filters, buyingPower);
 
   const lastRun = data?.recentRuns?.[0];
 
@@ -150,7 +142,7 @@ export function ScanDashboard() {
       </div>
 
       {/* Filters */}
-      <ScanFilters filters={filters} sectors={sectors} onChange={setFilters} />
+      <ScanFilters filters={filters} sectors={sectors} buyingPower={buyingPower} onChange={setFilters} />
 
       {/* Results */}
       {loading ? (
@@ -178,6 +170,9 @@ export function ScanDashboard() {
           ))}
         </div>
       )}
+
+      {/* Filter accuracy */}
+      <RejectionAccuracy />
 
       {/* Run history */}
       {data?.recentRuns && data.recentRuns.length > 1 && (

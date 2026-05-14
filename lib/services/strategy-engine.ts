@@ -7,6 +7,7 @@ import { congressService } from "./congress";
 import { marketDataService } from "./market-data";
 import { calculateTier1Risk, combineTiers, type Tier1Input } from "./risk-assessor";
 import { STRATEGY_SYSTEM_PROMPT, buildStrategyPrompt } from "@/lib/prompts/strategy";
+import { PENNY_STOCK_SYSTEM_PROMPT, buildPennyStockPrompt } from "@/lib/prompts/penny-stock";
 import type { Recommendation } from "@/lib/db/models";
 import { ObjectId } from "mongodb";
 import { rateLimiter } from "@/lib/utils/rate-limiter";
@@ -92,12 +93,13 @@ export async function runStrategyEngine(
 
   try {
     // Gather all context in parallel
-    const [bars, macroIndicators, news, congressTrades, { user, strategyHistory }] =
+    const [bars, macroIndicators, news, congressTrades, insiderPurchases, { user, strategyHistory }] =
       await Promise.all([
         marketDataService.getBars(req.symbol, "1Day", 30),
         getMacroIndicators(),
         newsService.getNewsForSymbols([req.symbol], req.alpacaToken),
         congressService.getTradesForSymbol(req.symbol, 90),
+        congressService.getInsiderPurchases(req.symbol, 90),
         getUserContext(req.userId),
       ]);
 
@@ -154,7 +156,45 @@ export async function runStrategyEngine(
 
     if (useAI) {
       const portfolioEquity = 100_000; // Will be replaced with real account data when available
-      const promptText = buildStrategyPrompt({
+      const isPennyStock = req.strategyType === "penny_stock";
+
+      // Compute penny-specific metrics when needed
+      const volumeSpike =
+        bars.length >= 2 && avgVolume > 0
+          ? (bars[bars.length - 1]?.volume ?? 0) / avgVolume
+          : 0;
+      const closes20 = bars.slice(-20).map((b) => b.close);
+      const priceChange1d =
+        closes20.length >= 2
+          ? ((closes20[closes20.length - 1] - closes20[closes20.length - 2]) / closes20[closes20.length - 2]) * 100
+          : 0;
+      const priceChange5d =
+        closes20.length >= 6
+          ? ((closes20[closes20.length - 1] - closes20[closes20.length - 6]) / closes20[closes20.length - 6]) * 100
+          : 0;
+      const priceChange20d =
+        closes20.length >= 2
+          ? ((closes20[closes20.length - 1] - closes20[0]) / closes20[0]) * 100
+          : 0;
+
+      const congressSignal = await congressService.getClusterSignal(req.symbol).catch(() => null);
+
+      const promptText = isPennyStock
+        ? buildPennyStockPrompt({
+            symbol: req.symbol,
+            price: currentPrice,
+            priceChange1d,
+            priceChange5d,
+            priceChange20d,
+            volumeSpike,
+            avgVolume20d: avgVolume,
+            exchange: "NASDAQ/NYSE",
+            news: news.map((n) => ({ headline: n.headline, sentiment: n.sentiment })),
+            insiderTrades: insiderPurchases.map((t) => ({ name: t.name, shares: t.shares, value: t.value })),
+            congressSignal: congressSignal?.signal ?? "neutral",
+            portfolioEquity,
+          })
+        : buildStrategyPrompt({
         symbol: req.symbol,
         timeframe: req.timeframe,
         strategyType: req.strategyType,
@@ -173,6 +213,12 @@ export async function runStrategyEngine(
           amountRange: t.amountRange,
           tradeDate: t.tradeDate.toISOString().split("T")[0],
         })),
+        insiderTrades: insiderPurchases.map((t) => ({
+          name: t.name,
+          shares: t.shares,
+          value: t.value,
+          transactionDate: t.transactionDate.toISOString().split("T")[0],
+        })),
         macroIndicators,
         marketConditions: { spyChange30d: 0, vix, sectorPerformance: {} },
         portfolioContext: {
@@ -188,12 +234,12 @@ export async function runStrategyEngine(
         await rateLimiter.checkAndIncrement("anthropic");
 
         const response = await client.messages.create({
-          model: "claude-opus-4-5",
+          model: isPennyStock ? "claude-sonnet-4-6" : "claude-opus-4-7",
           max_tokens: 2048,
           system: [
             {
               type: "text",
-              text: STRATEGY_SYSTEM_PROMPT,
+              text: isPennyStock ? PENNY_STOCK_SYSTEM_PROMPT : STRATEGY_SYSTEM_PROMPT,
               cache_control: { type: "ephemeral" },
             },
           ],

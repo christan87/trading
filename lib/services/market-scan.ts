@@ -4,6 +4,8 @@ import { getCollections } from "@/lib/db/mongodb";
 import { getRedis } from "@/lib/utils/redis";
 import { newsService, inferCategory, inferSentiment } from "@/lib/services/news";
 import { congressService } from "@/lib/services/congress";
+import { rejectedScanTracker } from "@/lib/services/rejected-scan-tracker";
+import { marketDataService } from "@/lib/services/market-data";
 import type { ScanResult, NewsEvent } from "@/lib/db/models";
 import {
   buildSectorScanPrompt,
@@ -19,7 +21,7 @@ const sp500: { symbol: string; name: string; sector: string }[] = require("@/dat
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const SCAN_DAILY_LIMIT = parseInt(process.env.SCAN_DAILY_LIMIT ?? "6", 10);
+const SCAN_DAILY_LIMIT = parseInt(process.env.SCAN_DAILY_LIMIT ?? "12", 10);
 const SCAN_EXPIRY_DAYS = 7;
 
 interface SectorImpact {
@@ -168,15 +170,26 @@ export class MarketScanService {
       }
     }
 
-    // Step 5: Persist results
-    if (results.length > 0) {
+    // Step 5: Free-fall detection (bearish signals, runs in parallel conceptually but awaited here)
+    let freeFallResults: Omit<ScanResult, "_id">[] = [];
+    try {
+      freeFallResults = await this.detectFreeFalls(scanId, scannedAt, expiresAt);
+      console.log(`[scan ${scanId}] step5: ${freeFallResults.length} free-fall bearish signals`);
+    } catch (err) {
+      console.error(`[scan ${scanId}] free-fall detection error:`, err);
+    }
+
+    const allResults = [...results, ...freeFallResults];
+
+    // Step 6: Persist results
+    if (allResults.length > 0) {
       const { scanResults } = await getCollections();
-      await scanResults.insertMany(results as ScanResult[]);
+      await scanResults.insertMany(allResults as ScanResult[]);
     }
 
     return {
       scanId,
-      candidatesFound: results.length,
+      candidatesFound: allResults.length,
       sectorsImpacted: impactedSectorNames,
       scannedAt,
       scansRemainingToday: remaining - 1,
@@ -276,7 +289,10 @@ export class MarketScanService {
       },
     ];
 
-    const congressCluster = await this.getCongressCluster(candidate.symbol);
+    const [congressCluster, insiderPurchases] = await Promise.all([
+      this.getCongressCluster(candidate.symbol),
+      congressService.getInsiderPurchases(candidate.symbol, 60),
+    ]);
 
     if (congressCluster && congressCluster.direction !== "neutral") {
       triggers.push({
@@ -285,6 +301,17 @@ export class MarketScanService {
         date: scannedAt,
         source: "congressional_data",
         relevanceScore: Math.min(1, (congressCluster.purchases + congressCluster.sales) / 10),
+      });
+    }
+
+    if (insiderPurchases.length >= 2) {
+      const totalValue = insiderPurchases.reduce((sum, t) => sum + t.value, 0);
+      triggers.push({
+        type: "political_event",
+        description: `${insiderPurchases.length} insider purchases totaling $${(totalValue / 1_000_000).toFixed(1)}M in last 60 days`,
+        date: scannedAt,
+        source: "insider_transactions",
+        relevanceScore: Math.min(1, insiderPurchases.length / 5),
       });
     }
 
@@ -301,7 +328,18 @@ export class MarketScanService {
     const riskScore = computeTier1Risk({ congressCluster, newsHeadlines });
 
     const maxRelevance = Math.max(...triggers.map((t) => t.relevanceScore));
-    if (maxRelevance < 0.4) return null;
+    if (maxRelevance < 0.4) {
+      rejectedScanTracker.recordAutoFilter({
+        scanId,
+        userId: null,
+        symbol: candidate.symbol,
+        sector: candidate.sector,
+        triggerSummary,
+        rejectionSource: "auto_filter",
+        rejectionReason: `Max trigger relevance ${maxRelevance.toFixed(2)} below 0.4 threshold`,
+      }).catch(() => undefined);
+      return null;
+    }
 
     const aiAnalysis = await this.runCandidateAnalysis({
       symbol: candidate.symbol,
@@ -311,9 +349,26 @@ export class MarketScanService {
       congressCluster,
       newsHeadlines,
       riskScore,
+      insiderPurchases: insiderPurchases.map((t) => ({
+        name: t.name,
+        shares: t.shares,
+        value: t.value,
+        transactionDate: t.transactionDate,
+      })),
     });
 
-    if (!aiAnalysis || aiAnalysis.confidence < 30) return null;
+    if (!aiAnalysis || aiAnalysis.confidence < 30) {
+      rejectedScanTracker.recordAutoFilter({
+        scanId,
+        userId: null,
+        symbol: candidate.symbol,
+        sector: candidate.sector,
+        triggerSummary,
+        rejectionSource: "low_confidence",
+        rejectionReason: `AI confidence ${aiAnalysis?.confidence ?? 0} below 30 threshold`,
+      }).catch(() => undefined);
+      return null;
+    }
 
     const primaryTriggerType = [...new Set(triggers.map((t) => t.type))][0] ?? "political_event";
 
@@ -387,6 +442,7 @@ export class MarketScanService {
     congressCluster: ScanResult["congressCluster"];
     newsHeadlines: ScanResult["newsHeadlines"];
     riskScore: number;
+    insiderPurchases?: { name: string; shares: number; value: number; transactionDate: Date }[];
   }): Promise<ScanResult["aiAnalysis"]> {
     const prompt = buildCandidateAnalysisPrompt(params);
 
@@ -454,6 +510,101 @@ export class MarketScanService {
     const { scanResults } = await getCollections();
     const result = await scanResults.deleteMany({ expiresAt: { $lt: new Date() } });
     return result.deletedCount;
+  }
+
+  private async detectFreeFalls(
+    scanId: string,
+    scannedAt: Date,
+    expiresAt: Date
+  ): Promise<Omit<ScanResult, "_id">[]> {
+    const results: Omit<ScanResult, "_id">[] = [];
+
+    // Sample a cross-sector subset of S&P 500 (up to 50) to check for free-falls
+    const candidates = sp500.slice(0, 50);
+
+    for (const candidate of candidates) {
+      try {
+        const bars = await marketDataService.getBars(candidate.symbol, "1Day", 25);
+        if (bars.length < 6) continue;
+
+        const closes = bars.map((b) => b.close);
+        const last5Closes = closes.slice(-5);
+        const priceChange5d = ((last5Closes[4] - last5Closes[0]) / last5Closes[0]) * 100;
+
+        // Must be down > 10% over last 5 trading days
+        if (priceChange5d > -10) continue;
+
+        const avgVolume20 = bars.slice(-20).reduce((s, b) => s + b.volume, 0) / 20;
+        const todayVolume = bars[bars.length - 1].volume;
+        const volumeSpike = avgVolume20 > 0 ? todayVolume / avgVolume20 : 0;
+
+        // Volume must confirm panic (>2x average)
+        if (volumeSpike < 2) continue;
+
+        // RSI below 30
+        const gains = closes.slice(1).map((c, i) => Math.max(0, c - closes[i]));
+        const losses = closes.slice(1).map((c, i) => Math.max(0, closes[i] - c));
+        const avgGain = gains.slice(-14).reduce((a, b) => a + b, 0) / 14;
+        const avgLoss = losses.slice(-14).reduce((a, b) => a + b, 0) / 14;
+        const rsi = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+        if (rsi >= 30) continue;
+
+        const currentPrice = closes[closes.length - 1];
+        const triggerSummary = `Free-fall detected: ${candidate.symbol} down ${Math.abs(priceChange5d).toFixed(1)}% in 5 days, RSI ${rsi.toFixed(0)}, volume ${volumeSpike.toFixed(1)}x avg`;
+
+        results.push({
+          userId: null,
+          scanId,
+          triggerType: "free_fall",
+          triggerSummary,
+          symbol: candidate.symbol,
+          companyName: candidate.name,
+          sector: candidate.sector,
+          industry: candidate.sector,
+          triggers: [
+            {
+              type: "political_event", // reuse closest existing type; signal source is technical
+              description: triggerSummary,
+              date: scannedAt,
+              source: "market_data",
+              relevanceScore: Math.min(1, volumeSpike / 5),
+            },
+          ],
+          entryRange: null,
+          expectedImpact: "high",
+          impactTimeframe: "weeks",
+          direction: "bearish",
+          congressCluster: null,
+          newsHeadlines: [],
+          aiAnalysis: {
+            thesis: `${candidate.symbol} is in a confirmed free-fall: price dropped ${Math.abs(priceChange5d).toFixed(1)}% over 5 days with volume ${volumeSpike.toFixed(1)}x the 20-day average, and RSI at ${rsi.toFixed(0)} (oversold). This may present a put option or short-sell opportunity for experienced traders.`,
+            catalysts: [
+              `5-day price decline: ${Math.abs(priceChange5d).toFixed(1)}%`,
+              `Volume spike: ${volumeSpike.toFixed(1)}x 20-day average`,
+              `RSI: ${rsi.toFixed(0)} (oversold)`,
+            ],
+            risks: [
+              "Oversold conditions can produce violent snap-back rallies",
+              "Short selling carries theoretically unlimited loss potential",
+            ],
+            suggestedDirection: "short",
+            suggestedTimeframe: "swing",
+            confidence: Math.min(90, 40 + Math.abs(priceChange5d) * 2),
+            disclaimer:
+              "Short positions and put options carry risk of significant loss. Short selling has theoretically unlimited loss potential. This is an AI-generated analysis for informational purposes only. It is not investment advice.",
+          },
+          riskScore: 8, // Free-fall signals are high risk by definition
+          status: "new",
+          promotedToRecommendationId: null,
+          scannedAt,
+          expiresAt,
+        });
+      } catch {
+        // Skip errors for individual symbols
+      }
+    }
+
+    return results;
   }
 }
 
