@@ -1,0 +1,230 @@
+import { getRedis, REDIS_KEYS } from "@/lib/utils/redis";
+import { rateLimiter } from "@/lib/utils/rate-limiter";
+
+const ALPACA_DATA_URL = process.env.ALPACA_DATA_URL ?? "https://data.alpaca.markets";
+const FINNHUB_KEY = process.env.FINNHUB_API_KEY ?? "";
+
+export interface Quote {
+  symbol: string;
+  price: number;
+  open: number;
+  high: number;
+  low: number;
+  previousClose: number;
+  change: number;
+  changePct: number;
+  volume: number;
+  timestamp: number;
+  source: "alpaca" | "finnhub";
+}
+
+export interface Bar {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface OptionsContract {
+  symbol: string;
+  strike_price: number;
+  expiration_date: string;
+  type: "call" | "put";
+  open_interest: number;
+  volume: number;
+  bid: number;
+  ask: number;
+  implied_volatility: number | null;
+  delta: number | null;
+  gamma: number | null;
+  theta: number | null;
+  vega: number | null;
+}
+
+async function alpacaDataFetch<T>(path: string, token?: string): Promise<T> {
+  await rateLimiter.checkAndIncrement("alpaca_data");
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  } else {
+    // Fall back to API key auth for public data endpoints
+    headers["APCA-API-KEY-ID"] = process.env.ALPACA_CLIENT_ID ?? "";
+    headers["APCA-API-SECRET-KEY"] = process.env.ALPACA_CLIENT_SECRET ?? "";
+  }
+
+  const res = await fetch(`${ALPACA_DATA_URL}${path}`, { headers });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Alpaca data ${path} ${res.status}: ${text}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+async function finnhubFetch<T>(path: string): Promise<T> {
+  await rateLimiter.checkAndIncrement("finnhub");
+  const separator = path.includes("?") ? "&" : "?";
+  const res = await fetch(`https://finnhub.io/api/v1${path}${separator}token=${FINNHUB_KEY}`);
+  if (!res.ok) throw new Error(`Finnhub ${path} ${res.status}`);
+  return res.json() as Promise<T>;
+}
+
+export class MarketDataService {
+  async getQuote(symbol: string): Promise<Quote> {
+    const cached = await this.getCachedQuote(symbol);
+    if (cached) return cached;
+
+    try {
+      return await this.getAlpacaQuote(symbol);
+    } catch {
+      return await this.getFinnhubQuote(symbol);
+    }
+  }
+
+  private async getCachedQuote(symbol: string): Promise<Quote | null> {
+    const redis = getRedis();
+    const raw = await redis.get<Quote>(REDIS_KEYS.quote(symbol));
+    if (!raw) return null;
+    // Stale if older than 15 seconds
+    if (Date.now() - raw.timestamp > 15_000) return null;
+    return raw;
+  }
+
+  private async getAlpacaQuote(symbol: string): Promise<Quote> {
+    const data = await alpacaDataFetch<{
+      quote: { ap: number; bp: number; t: string };
+      trade: { p: number; s: number; t: string };
+    }>(`/v2/stocks/${symbol}/quotes/latest?feed=iex`);
+
+    const price = data.trade.p;
+    const quote: Quote = {
+      symbol,
+      price,
+      open: 0,
+      high: 0,
+      low: 0,
+      previousClose: 0,
+      change: 0,
+      changePct: 0,
+      volume: data.trade.s,
+      timestamp: Date.now(),
+      source: "alpaca",
+    };
+
+    await this.cacheQuote(symbol, quote);
+    return quote;
+  }
+
+  private async getFinnhubQuote(symbol: string): Promise<Quote> {
+    const data = await finnhubFetch<{
+      c: number; h: number; l: number; o: number; pc: number; v: number; t: number;
+    }>(`/quote?symbol=${symbol}`);
+
+    const quote: Quote = {
+      symbol,
+      price: data.c,
+      open: data.o,
+      high: data.h,
+      low: data.l,
+      previousClose: data.pc,
+      change: data.c - data.pc,
+      changePct: ((data.c - data.pc) / data.pc) * 100,
+      volume: data.v,
+      timestamp: Date.now(),
+      source: "finnhub",
+    };
+
+    await this.cacheQuote(symbol, quote);
+    return quote;
+  }
+
+  private async cacheQuote(symbol: string, quote: Quote): Promise<void> {
+    const redis = getRedis();
+    await redis.set(REDIS_KEYS.quote(symbol), quote, { ex: 30 });
+  }
+
+  async getBars(
+    symbol: string,
+    timeframe: "1Min" | "5Min" | "15Min" | "1Hour" | "1Day" = "1Day",
+    limit = 30
+  ): Promise<Bar[]> {
+    const data = await alpacaDataFetch<{ bars: Record<string, { t: string; o: number; h: number; l: number; c: number; v: number }[]> }>(
+      `/v2/stocks/bars?symbols=${symbol}&timeframe=${timeframe}&limit=${limit}&feed=iex`
+    );
+
+    const bars = data.bars[symbol] ?? [];
+    return bars.map((b) => ({
+      timestamp: b.t,
+      open: b.o,
+      high: b.h,
+      low: b.l,
+      close: b.c,
+      volume: b.v,
+    }));
+  }
+
+  async getOptionsChain(
+    symbol: string,
+    expiration?: string
+  ): Promise<OptionsContract[]> {
+    const params = new URLSearchParams({ underlying_symbols: symbol, limit: "100" });
+    if (expiration) params.set("expiration_date_gte", expiration);
+
+    const data = await alpacaDataFetch<{
+      option_contracts: {
+        symbol: string;
+        strike_price: string;
+        expiration_date: string;
+        type: "call" | "put";
+        open_interest: number;
+        volume: number;
+        close_price: string | null;
+        greeks: { delta: number | null; gamma: number | null; theta: number | null; vega: number | null } | null;
+        implied_volatility: string | null;
+      }[];
+    }>(`/v2/options/snapshots/${symbol}?feed=indicative`);
+
+    return (data.option_contracts ?? []).map((c) => ({
+      symbol: c.symbol,
+      strike_price: parseFloat(c.strike_price),
+      expiration_date: c.expiration_date,
+      type: c.type,
+      open_interest: c.open_interest,
+      volume: c.volume,
+      bid: 0,
+      ask: parseFloat(c.close_price ?? "0"),
+      implied_volatility: c.implied_volatility ? parseFloat(c.implied_volatility) : null,
+      delta: c.greeks?.delta ?? null,
+      gamma: c.greeks?.gamma ?? null,
+      theta: c.greeks?.theta ?? null,
+      vega: c.greeks?.vega ?? null,
+    }));
+  }
+
+  async getCompanyProfile(symbol: string): Promise<{
+    name: string;
+    industry: string;
+    marketCap: number;
+    description: string;
+  }> {
+    const data = await finnhubFetch<{
+      name: string;
+      finnhubIndustry: string;
+      marketCapitalization: number;
+      description: string;
+    }>(`/stock/profile2?symbol=${symbol}`);
+
+    return {
+      name: data.name ?? symbol,
+      industry: data.finnhubIndustry ?? "",
+      marketCap: data.marketCapitalization ?? 0,
+      description: data.description ?? "",
+    };
+  }
+}
+
+export const marketDataService = new MarketDataService();

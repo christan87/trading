@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx create-next-app@latest *)",
+      "Bash(cp -r trading-app-init/. app/)",
+      "Bash(rm -rf trading-app-init)",
+      "Bash(npm install *)",
+      "Bash(node -e \"const a = require\\('anthropic'\\); console.log\\(a.VERSION || 'ok'\\)\")",
+      "Bash(npm show *)",
+      "Bash(npm uninstall *)",
+      "Bash(npx tsc *)",
+      "Bash(./node_modules/typescript/bin/tsc --noEmit)",
+      "Bash(npm run *)",
+      "Bash(node -e \"require\\('/Users/christanprices/Desktop/fullstack/trading/app/node_modules/next/dist/server/require-hook'\\)\")",
+      "Bash(ln -s ../next/dist/bin/next /Users/christanprices/Desktop/fullstack/trading/app/node_modules/.bin/next)",
+      "Bash(node /Users/christanprices/Desktop/fullstack/trading/app/node_modules/.bin/next --version)",
+      "Bash(ln -s ../typescript/bin/tsc node_modules/.bin/tsc)",
+      "Bash(node node_modules/.bin/tsc --noEmit)",
+      "Bash(mkdir -p \"/Users/christanprices/Desktop/fullstack/trading/app/app/api/learning/generated/[id]\")",
+      "Bash(mkdir -p \"/Users/christanprices/Desktop/fullstack/trading/app/app/api/strategies/[id]/adapt\")"
+    ]
+  }
+}
