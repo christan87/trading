@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import type { ScanResult } from "@/lib/db/models";
 import type { OptionsScanParams, OptionsStrategyType } from "@/lib/services/options-scan";
-import { OptionsScanResultCard } from "./OptionsScanResultCard";
+import { UnifiedScanCard } from "./unified-scan-card";
+import { ScanProgressBar } from "./scan-progress-bar";
 
 interface RunMeta {
   scanId: string;
@@ -27,10 +28,27 @@ const STRATEGY_OPTIONS: { value: OptionsStrategyType; label: string; description
 const REMAINING_COLORS = (n: number) =>
   n >= 2 ? "text-emerald-400" : n >= 1 ? "text-yellow-400" : "text-red-400";
 
+function FadeInCard({ children }: { children: React.ReactNode }) {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setVisible(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+  return (
+    <div style={{ opacity: visible ? 1 : 0, transition: "opacity 300ms ease-out" }}>
+      {children}
+    </div>
+  );
+}
+
 export function OptionsScanDashboard() {
   const [data, setData] = useState<OptionsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
+  const [activeScanId, setActiveScanId] = useState<string | null>(null);
+  const [streamedResults, setStreamedResults] = useState<ScanResult[]>([]);
+  const newResultIds = useRef<Set<string>>(new Set());
+  const doneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [planLimited, setPlanLimited] = useState(false);
 
@@ -46,6 +64,8 @@ export function OptionsScanDashboard() {
       const res = await fetch("/api/scan/options");
       if (res.ok) {
         setData(await res.json());
+        setStreamedResults([]);
+        newResultIds.current.clear();
         setError(null);
       } else {
         setError("Failed to load options scan results.");
@@ -57,19 +77,41 @@ export function OptionsScanDashboard() {
     }
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => () => {
+    if (doneTimerRef.current) clearTimeout(doneTimerRef.current);
+  }, []);
+
+  const handleStreamedResult = useCallback((result: ScanResult) => {
+    const id = (result._id as unknown as { toString(): string }).toString();
+    newResultIds.current.add(id);
+    setStreamedResults((prev) => {
+      const key = `${result.scanId}:${result.symbol}`;
+      if (prev.some((r) => `${r.scanId}:${r.symbol}` === key)) return prev;
+      return [result, ...prev];
+    });
+  }, []);
+
+  const handleScanDone = useCallback(() => {
+    doneTimerRef.current = setTimeout(() => {
+      if (doneTimerRef.current) setActiveScanId(null);
+    }, 100);
+  }, []);
 
   const handleScan = async () => {
+    const scanId = crypto.randomUUID();
     setScanning(true);
+    setActiveScanId(scanId);
+    setStreamedResults([]);
+    newResultIds.current.clear();
     setError(null);
     setPlanLimited(false);
     try {
       const res = await fetch("/api/scan/options/trigger", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(params),
+        body: JSON.stringify({ ...params, scanId }),
       });
       const body = await res.json();
       if (res.ok) {
@@ -125,6 +167,15 @@ export function OptionsScanDashboard() {
             </button>
           </div>
         </div>
+
+        {activeScanId && (
+          <ScanProgressBar
+            scanId={activeScanId}
+            onResult={handleStreamedResult}
+            onRejection={() => {}}
+            onDone={handleScanDone}
+          />
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <div>
@@ -200,19 +251,36 @@ export function OptionsScanDashboard() {
             <div key={i} className="h-48 bg-zinc-800 rounded-xl" />
           ))}
         </div>
-      ) : !data || data.results.length === 0 ? (
+      ) : (!data || data.results.length === 0) && streamedResults.length === 0 ? (
         <div className="text-center py-12 text-zinc-500">
           <p className="text-sm">No options scan results yet. Configure parameters above and click Run Options Scan.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-          {data.results.map((result) => (
-            <OptionsScanResultCard
-              key={(result._id as unknown as { toString(): string }).toString()}
-              result={result}
-              onStatusChange={handleStatusChange}
-            />
-          ))}
+          {(() => {
+            const allResults = streamedResults.length > 0
+              ? [
+                  ...streamedResults,
+                  ...(data?.results ?? []).filter((r) => {
+                    const key = `${r.scanId}:${r.symbol}`;
+                    return !streamedResults.some((s) => `${s.scanId}:${s.symbol}` === key);
+                  }),
+                ]
+              : (data?.results ?? []);
+            return allResults.map((result) => {
+              const id = (result._id as unknown as { toString(): string }).toString();
+              const isNew = newResultIds.current.has(id);
+              const card = (
+                <UnifiedScanCard
+                  key={id}
+                  mode="scan"
+                  data={result}
+                  onStatusChange={handleStatusChange}
+                />
+              );
+              return isNew ? <FadeInCard key={id}>{card}</FadeInCard> : <div key={id}>{card}</div>;
+            });
+          })()}
         </div>
       )}
 

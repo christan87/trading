@@ -452,6 +452,20 @@ export interface PennyStockTicker {
   cachedAt: Date;
 }
 
+export interface PennyRejectedCandidate {
+  _id: ObjectId;
+  scanId: string;
+  symbol: string;
+  companyName: string;
+  exchange: string;
+  price: number;
+  volume: number;
+  priceChange1d: number;
+  volumeSpike: number;
+  rejectionReason: "no_momentum" | "low_ai_confidence" | "no_triggers" | "scan_cap";
+  scannedAt: Date;
+}
+
 export interface VirtualTrader {
   _id: ObjectId;
   userId: ObjectId;

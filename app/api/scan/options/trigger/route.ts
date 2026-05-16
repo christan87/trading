@@ -14,23 +14,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let params: Partial<OptionsScanParams>;
+  let raw: Partial<OptionsScanParams> & { scanId?: string } = {};
   try {
-    params = await req.json();
+    raw = await req.json();
   } catch {
-    params = {};
+    raw = {};
   }
 
   const body: OptionsScanParams = {
-    strategyType: params.strategyType ?? "covered_call",
-    minOpenInterest: params.minOpenInterest ?? 100,
-    maxDTE: params.maxDTE ?? 45,
-    minIVPercentile: params.minIVPercentile ?? 0,
-    tickers: params.tickers,
+    strategyType: raw.strategyType ?? "covered_call",
+    minOpenInterest: raw.minOpenInterest ?? 100,
+    maxDTE: raw.maxDTE ?? 45,
+    minIVPercentile: raw.minIVPercentile ?? 0,
+    tickers: raw.tickers,
   };
+  const providedScanId = typeof raw.scanId === "string" && raw.scanId.length > 0 ? raw.scanId : undefined;
 
   try {
-    const summary = await optionsScanService.runOptionsScan(body);
+    const summary = await optionsScanService.runOptionsScan(body, providedScanId);
     return NextResponse.json({ ...summary, scansRemainingToday: remaining - 1 });
   } catch (err) {
     console.error("[api/scan/options/trigger]", err);

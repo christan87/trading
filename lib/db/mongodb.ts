@@ -16,6 +16,7 @@ import type {
   RejectedScan,
   InsiderTrade,
   PennyStockTicker,
+  PennyRejectedCandidate,
   VirtualTrader,
   VirtualPosition,
   StopLoss,
@@ -68,6 +69,7 @@ export async function getCollections() {
     rejectedScans: db.collection<RejectedScan>("rejectedScans"),
     insiderTrades: db.collection<InsiderTrade>("insiderTrades"),
     pennyStockUniverse: db.collection<PennyStockTicker>("pennyStockUniverse"),
+    pennyRejectedCandidates: db.collection<PennyRejectedCandidate>("pennyRejectedCandidates"),
     virtualTraders: db.collection<VirtualTrader>("virtualTraders"),
     virtualPositions: db.collection<VirtualPosition>("virtualPositions"),
     stopLosses: db.collection<StopLoss>("stopLosses"),
@@ -107,6 +109,8 @@ export async function ensureIndexes(): Promise<void> {
   );
   await db.collection("pennyStockUniverse").createIndex({ symbol: 1 }, { unique: true });
   await db.collection("pennyStockUniverse").createIndex({ cachedAt: 1 });
+  await db.collection("pennyRejectedCandidates").createIndex({ scanId: 1 });
+  await db.collection("pennyRejectedCandidates").createIndex({ scannedAt: -1 });
   await db.collection("virtualTraders").createIndex({ userId: 1, strategyId: 1 }, { unique: true });
   await db.collection("virtualPositions").createIndex({ virtualTraderId: 1, status: 1 });
   await db.collection("virtualPositions").createIndex({ virtualTraderId: 1, openedAt: -1 });

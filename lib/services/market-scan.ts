@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ObjectId } from "mongodb";
 import { getCollections } from "@/lib/db/mongodb";
-import { getRedis } from "@/lib/utils/redis";
+import { getRedis, REDIS_KEYS } from "@/lib/utils/redis";
 import { newsService, inferCategory, inferSentiment } from "@/lib/services/news";
 import { congressService } from "@/lib/services/congress";
 import { rejectedScanTracker } from "@/lib/services/rejected-scan-tracker";
@@ -77,6 +77,16 @@ export interface ScanRunSummary {
   scansRemainingToday?: number;
 }
 
+export interface ScanProgress {
+  scanId: string;
+  step: number;
+  stepLabel: string;
+  percentComplete: number;
+  candidatesFound: number;
+  candidatesAnalyzed: number;
+  candidatesTotal: number;
+}
+
 export class MarketScanService {
   async checkDailyLimit(): Promise<{ allowed: boolean; remaining: number }> {
     const redis = getRedis();
@@ -93,7 +103,25 @@ export class MarketScanService {
     await redis.set(key, current + 1, { ex: 86400 });
   }
 
-  async runScan(triggerType: ScanResult["triggerType"] = "manual"): Promise<ScanRunSummary> {
+  private async publishEvent(scanId: string, event: object): Promise<void> {
+    try {
+      const redis = getRedis();
+      const key = REDIS_KEYS.scanEvents(scanId);
+      await redis.rpush(key, JSON.stringify(event));
+      await redis.expire(key, 300); // 5-minute TTL covers any scan
+    } catch {
+      // Non-fatal: progress streaming failure doesn't break the scan
+    }
+  }
+
+  private async publishProgress(scanId: string, progress: Omit<ScanProgress, "scanId">): Promise<void> {
+    await this.publishEvent(scanId, { type: "progress", ...progress, scanId });
+  }
+
+  async runScan(
+    triggerType: ScanResult["triggerType"] = "manual",
+    providedScanId?: string
+  ): Promise<ScanRunSummary> {
     const { allowed, remaining } = await this.checkDailyLimit();
     if (!allowed) {
       return {
@@ -108,46 +136,87 @@ export class MarketScanService {
 
     await this.incrementDailyCount();
 
-    const scanId = new ObjectId().toHexString();
+    const scanId = providedScanId ?? new ObjectId().toHexString();
     const scannedAt = new Date();
     const expiresAt = new Date(Date.now() + SCAN_EXPIRY_DAYS * 86400_000);
 
-    // Step 1: Fetch recent political/regulatory/geopolitical news
+    // Step 1: Trigger received
+    await this.publishProgress(scanId, {
+      step: 1,
+      stepLabel: "Fetching recent news…",
+      percentComplete: 2,
+      candidatesFound: 0,
+      candidatesAnalyzed: 0,
+      candidatesTotal: 0,
+    });
+
     const politicalArticles = await this.fetchPoliticalNews();
     console.log(`[scan ${scanId}] step1: ${politicalArticles.length} political/macro articles`);
 
     if (politicalArticles.length === 0) {
       console.log(`[scan ${scanId}] aborting — no news articles found`);
+      await this.publishEvent(scanId, { type: "done", scanId, candidatesFound: 0 });
       return { scanId, candidatesFound: 0, sectorsImpacted: [], scannedAt, scansRemainingToday: remaining - 1 };
     }
 
-    // Build a human-readable trigger summary from the most recent article
     const topArticle = politicalArticles[0];
     const triggerSummary = topArticle
       ? `${topArticle.category.charAt(0).toUpperCase() + topArticle.category.slice(1)} event: ${topArticle.headline.slice(0, 120)}`
       : "Scan triggered by recent political/regulatory news";
 
-    // Step 2: Claude Sonnet classifies which sectors are impacted
+    // Step 2: Sector classification
+    await this.publishProgress(scanId, {
+      step: 2,
+      stepLabel: "Classifying impacted sectors…",
+      percentComplete: 10,
+      candidatesFound: 0,
+      candidatesAnalyzed: 0,
+      candidatesTotal: 0,
+    });
+
     const sectorImpacts = await this.classifySectors(politicalArticles);
     console.log(`[scan ${scanId}] step2: ${sectorImpacts.length} sector impacts — ${sectorImpacts.map(s => s.sector).join(", ")}`);
 
     if (sectorImpacts.length === 0) {
       console.log(`[scan ${scanId}] aborting — Claude returned no impacted sectors`);
+      await this.publishEvent(scanId, { type: "done", scanId, candidatesFound: 0 });
       return { scanId, candidatesFound: 0, sectorsImpacted: [], scannedAt, scansRemainingToday: remaining - 1 };
     }
 
     const impactedSectorNames = [...new Set(sectorImpacts.map((s) => s.sector))];
 
-    // Step 3: Find S&P 500 candidates in impacted sectors (max 20)
+    // Step 3: Candidate filtering
     const candidates = sp500
       .filter((stock) => impactedSectorNames.includes(stock.sector))
       .slice(0, 20);
     console.log(`[scan ${scanId}] step3: ${candidates.length} S&P 500 candidates in sectors: ${impactedSectorNames.join(", ")}`);
 
-    // Step 4: For each candidate, gather congress cluster + recent news + Claude Opus analysis
-    const results: Omit<ScanResult, "_id">[] = [];
+    await this.publishProgress(scanId, {
+      step: 3,
+      stepLabel: `Filtering candidates in ${impactedSectorNames.slice(0, 3).join(", ")}…`,
+      percentComplete: 30,
+      candidatesFound: 0,
+      candidatesAnalyzed: 0,
+      candidatesTotal: candidates.length,
+    });
 
-    for (const candidate of candidates) {
+    // Step 4: Per-candidate analysis — save each result immediately and stream it
+    const { scanResults: scanResultsCol } = await getCollections();
+    let candidatesFound = 0;
+
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+      const stepProgress = 50 + Math.round((i / candidates.length) * 45);
+
+      await this.publishProgress(scanId, {
+        step: 4,
+        stepLabel: `Analyzing ${candidate.symbol}…`,
+        percentComplete: stepProgress,
+        candidatesFound,
+        candidatesAnalyzed: i,
+        candidatesTotal: candidates.length,
+      });
+
       try {
         const result = await this.analyzeCandidate(
           candidate,
@@ -160,8 +229,14 @@ export class MarketScanService {
           expiresAt
         );
         if (result) {
-          results.push(result);
+          const inserted = await scanResultsCol.insertOne(result as ScanResult);
+          candidatesFound++;
           console.log(`[scan ${scanId}] ✓ ${candidate.symbol} confidence=${result.aiAnalysis?.confidence}`);
+          await this.publishEvent(scanId, {
+            type: "result",
+            scanId,
+            data: { ...result, _id: inserted.insertedId.toHexString() },
+          });
         } else {
           console.log(`[scan ${scanId}] ✗ ${candidate.symbol} filtered out`);
         }
@@ -170,26 +245,39 @@ export class MarketScanService {
       }
     }
 
-    // Step 5: Free-fall detection (bearish signals, runs in parallel conceptually but awaited here)
-    let freeFallResults: Omit<ScanResult, "_id">[] = [];
+    // Free-fall detection — results saved and streamed as they come
+    let freeFallCount = 0;
     try {
-      freeFallResults = await this.detectFreeFalls(scanId, scannedAt, expiresAt);
-      console.log(`[scan ${scanId}] step5: ${freeFallResults.length} free-fall bearish signals`);
+      const freeFallResults = await this.detectFreeFalls(scanId, scannedAt, expiresAt);
+      console.log(`[scan ${scanId}] free-fall: ${freeFallResults.length} bearish signals`);
+      for (const result of freeFallResults) {
+        const inserted = await scanResultsCol.insertOne(result as ScanResult);
+        freeFallCount++;
+        await this.publishEvent(scanId, {
+          type: "result",
+          scanId,
+          data: { ...result, _id: inserted.insertedId.toHexString() },
+        });
+      }
     } catch (err) {
       console.error(`[scan ${scanId}] free-fall detection error:`, err);
     }
 
-    const allResults = [...results, ...freeFallResults];
+    const totalFound = candidatesFound + freeFallCount;
 
-    // Step 6: Persist results
-    if (allResults.length > 0) {
-      const { scanResults } = await getCollections();
-      await scanResults.insertMany(allResults as ScanResult[]);
-    }
+    await this.publishProgress(scanId, {
+      step: 5,
+      stepLabel: `Scan complete — ${totalFound} result${totalFound !== 1 ? "s" : ""} found`,
+      percentComplete: 100,
+      candidatesFound: totalFound,
+      candidatesAnalyzed: candidates.length,
+      candidatesTotal: candidates.length,
+    });
+    await this.publishEvent(scanId, { type: "done", scanId, candidatesFound: totalFound });
 
     return {
       scanId,
-      candidatesFound: allResults.length,
+      candidatesFound: totalFound,
       sectorsImpacted: impactedSectorNames,
       scannedAt,
       scansRemainingToday: remaining - 1,
@@ -329,6 +417,7 @@ export class MarketScanService {
 
     const maxRelevance = Math.max(...triggers.map((t) => t.relevanceScore));
     if (maxRelevance < 0.4) {
+      const reason = `Low relevance score (${maxRelevance.toFixed(2)} < 0.4)`;
       rejectedScanTracker.recordAutoFilter({
         scanId,
         userId: null,
@@ -336,7 +425,13 @@ export class MarketScanService {
         sector: candidate.sector,
         triggerSummary,
         rejectionSource: "auto_filter",
-        rejectionReason: `Max trigger relevance ${maxRelevance.toFixed(2)} below 0.4 threshold`,
+        rejectionReason: reason,
+      }).catch(() => undefined);
+      this.publishEvent(scanId, {
+        type: "rejection",
+        symbol: candidate.symbol,
+        sector: candidate.sector,
+        reason,
       }).catch(() => undefined);
       return null;
     }
@@ -358,6 +453,7 @@ export class MarketScanService {
     });
 
     if (!aiAnalysis || aiAnalysis.confidence < 30) {
+      const reason = `Low AI confidence (${aiAnalysis?.confidence ?? 0} < 30)`;
       rejectedScanTracker.recordAutoFilter({
         scanId,
         userId: null,
@@ -365,7 +461,13 @@ export class MarketScanService {
         sector: candidate.sector,
         triggerSummary,
         rejectionSource: "low_confidence",
-        rejectionReason: `AI confidence ${aiAnalysis?.confidence ?? 0} below 30 threshold`,
+        rejectionReason: reason,
+      }).catch(() => undefined);
+      this.publishEvent(scanId, {
+        type: "rejection",
+        symbol: candidate.symbol,
+        sector: candidate.sector,
+        reason,
       }).catch(() => undefined);
       return null;
     }

@@ -17,7 +17,13 @@
       "Bash(ln -s ../typescript/bin/tsc node_modules/.bin/tsc)",
       "Bash(node node_modules/.bin/tsc --noEmit)",
       "Bash(mkdir -p \"/Users/christanprices/Desktop/fullstack/trading/app/app/api/learning/generated/[id]\")",
-      "Bash(mkdir -p \"/Users/christanprices/Desktop/fullstack/trading/app/app/api/strategies/[id]/adapt\")"
+      "Bash(mkdir -p \"/Users/christanprices/Desktop/fullstack/trading/app/app/api/strategies/[id]/adapt\")",
+      "Bash(node *)",
+      "Bash(node_modules/.bin/tsc --noEmit)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(curl *)",
+      "Bash(git *)"
     ]
   }
 }

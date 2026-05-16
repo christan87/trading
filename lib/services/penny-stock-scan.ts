@@ -6,20 +6,27 @@ import { marketDataService } from "@/lib/services/market-data";
 import { congressService } from "@/lib/services/congress";
 import { newsService } from "@/lib/services/news";
 import { calculateTier1Risk } from "@/lib/services/risk-assessor";
-import type { ScanResult, PennyStockTicker } from "@/lib/db/models";
+import type { ScanResult, PennyStockTicker, PennyRejectedCandidate } from "@/lib/db/models";
 
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY ?? "";
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const PENNY_MIN_PRICE = 0.10;
-const PENNY_MAX_PRICE = 5.00;
-const PENNY_MIN_AVG_VOLUME = 500_000;
-const PENNY_MAX_POSITION_PCT = 2;    // enforce 2% max per CLAUDE.md
-const PENNY_MIN_TIER1_RISK = 6;      // floor risk score per spec
+const DEFAULT_MIN_PRICE = 0.10;
+const DEFAULT_MAX_PRICE = 5.00;
+const DEFAULT_MIN_VOLUME = 0;
+const PENNY_MAX_POSITION_PCT = 2;
+const PENNY_MIN_TIER1_RISK = 6;
 const PENNY_SCAN_DAILY_LIMIT = parseInt(process.env.SCAN_DAILY_LIMIT ?? "12", 10);
 const PENNY_MAX_CANDIDATES = 20;
+const PENNY_MAX_AI_CALLS = 8;   // hard cap on expensive Claude+congress+news calls per scan
 const UNIVERSE_TTL_MS = 24 * 3600_000;
 const SCAN_EXPIRY_DAYS = 7;
+
+export interface ScanParams {
+  minPrice?: number;
+  maxPrice?: number;
+  minVolume?: number;
+}
 
 function todayKey(): string {
   return new Date().toISOString().split("T")[0];
@@ -31,6 +38,16 @@ export interface PennyScanSummary {
   scannedAt: Date;
   rateLimited?: boolean;
   scansRemainingToday: number;
+  sampledCount?: number;
+  priceFilteredCount?: number;
+  volumeFilteredCount?: number;
+}
+
+interface AlpacaSnapshotEntry {
+  price: number;
+  prevPrice: number;
+  volume: number;
+  prevVolume: number;
 }
 
 interface FinnhubSymbol {
@@ -114,7 +131,83 @@ export class PennyStockScanService {
       .toArray();
   }
 
-  async runScan(): Promise<PennyScanSummary> {
+  // Fetch bulk snapshots from Alpaca for a batch of symbols (up to 100 at a time).
+  // Returns a map of symbol → snapshot data including yesterday's price/volume.
+  private async getAlpacaSnapshots(
+    symbols: string[]
+  ): Promise<Record<string, AlpacaSnapshotEntry>> {
+    const ALPACA_DATA_URL = process.env.ALPACA_DATA_URL ?? "https://data.alpaca.markets";
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (process.env.ALPACA_API_KEY) {
+      headers["APCA-API-KEY-ID"] = process.env.ALPACA_API_KEY;
+      headers["APCA-API-SECRET-KEY"] = process.env.ALPACA_API_SECRET ?? "";
+    }
+
+    const out: Record<string, AlpacaSnapshotEntry> = {};
+    for (let i = 0; i < symbols.length; i += 100) {
+      const batch = symbols.slice(i, i + 100).join(",");
+      try {
+        const res = await fetch(
+          `${ALPACA_DATA_URL}/v2/stocks/snapshots?symbols=${encodeURIComponent(batch)}&feed=iex`,
+          { headers }
+        );
+        if (!res.ok) {
+          console.log(`[penny-scan] Alpaca snapshot batch ${i}-${i + 100}: ${res.status}`);
+          continue;
+        }
+        const data = await res.json() as Record<string, {
+          dailyBar?: { c: number; v: number };
+          prevDailyBar?: { c: number; v: number };
+          latestTrade?: { p: number };
+          latestQuote?: { bp: number };
+        }>;
+        for (const [sym, snap] of Object.entries(data)) {
+          const price = snap.dailyBar?.c ?? snap.latestTrade?.p ?? snap.latestQuote?.bp ?? 0;
+          if (price <= 0) continue;
+          out[sym] = {
+            price,
+            prevPrice: snap.prevDailyBar?.c ?? price,
+            volume: snap.dailyBar?.v ?? 0,
+            prevVolume: snap.prevDailyBar?.v ?? 0,
+          };
+        }
+      } catch (err) {
+        console.error(`[penny-scan] Alpaca snapshot error:`, err);
+      }
+    }
+    return out;
+  }
+
+  private async publishEvent(scanId: string, event: object): Promise<void> {
+    try {
+      const redis = getRedis();
+      const key = REDIS_KEYS.scanEvents(scanId);
+      await redis.rpush(key, JSON.stringify(event));
+      await redis.expire(key, 300);
+    } catch { /* non-fatal */ }
+  }
+
+  private async publishProgress(
+    scanId: string,
+    step: number,
+    stepLabel: string,
+    percentComplete: number,
+    candidatesFound: number,
+    candidatesAnalyzed: number,
+    candidatesTotal: number,
+  ): Promise<void> {
+    await this.publishEvent(scanId, {
+      type: "progress",
+      scanId, step, stepLabel, percentComplete,
+      candidatesFound, candidatesAnalyzed, candidatesTotal,
+    });
+  }
+
+  async runScan(params?: ScanParams, providedScanId?: string): Promise<PennyScanSummary> {
+    const minPrice = params?.minPrice ?? DEFAULT_MIN_PRICE;
+    const maxPrice = params?.maxPrice ?? DEFAULT_MAX_PRICE;
+    const minVolume = params?.minVolume ?? DEFAULT_MIN_VOLUME;
+
     const { allowed, remaining } = await this.checkDailyLimit();
     if (!allowed) {
       return {
@@ -128,39 +221,170 @@ export class PennyStockScanService {
 
     await this.incrementDailyCount();
 
-    const scanId = new ObjectId().toHexString();
+    const scanId = providedScanId ?? new ObjectId().toHexString();
     const scannedAt = new Date();
     const expiresAt = new Date(Date.now() + SCAN_EXPIRY_DAYS * 86400_000);
 
-    // Get the universe and shuffle so we get variety each scan
+    await this.publishProgress(scanId, 1, "Fetching penny stock universe…", 5, 0, 0, 0);
+
     const universe = await this.getUniverse();
     const shuffled = universe.sort(() => Math.random() - 0.5);
+    const sample = shuffled.slice(0, 1000);
+    console.log(`[penny-scan] Universe: ${universe.length}, sampling ${sample.length} | params: $${minPrice}–$${maxPrice}, minIexVol≥${minVolume}`);
 
-    const results: Omit<ScanResult, "_id">[] = [];
-    let evaluated = 0;
+    await this.publishProgress(scanId, 2, "Fetching price snapshots…", 15, 0, 0, 0);
 
-    for (const ticker of shuffled) {
-      if (results.length >= PENNY_MAX_CANDIDATES || evaluated >= 200) break;
-      evaluated++;
+    // Bulk snapshot: price + IEX volume for all sampled tickers (10 Alpaca calls)
+    // Note: penny stocks rarely trade on IEX, so dailyBar.v is IEX-only venue volume (not total market).
+    // We use it as a relative activity signal (today vs yesterday), not an absolute liquidity gate.
+    const snapshots = await this.getAlpacaSnapshots(sample.map((t) => t.symbol));
+    const tickerMap = new Map(sample.map((t) => [t.symbol, t]));
 
-      try {
-        const result = await this.analyzeCandidate(ticker, scanId, scannedAt, expiresAt);
-        if (result) results.push(result);
-      } catch {
-        // skip
+    const preCandidates: Array<{ ticker: PennyStockTicker; price: number; prevPrice: number; volume: number; prevVolume: number }> = [];
+    for (const [symbol, snap] of Object.entries(snapshots)) {
+      if (snap.price < minPrice || snap.price > maxPrice) continue;
+      if (snap.volume < minVolume) continue;    // IEX venue volume threshold
+      const ticker = tickerMap.get(symbol);
+      if (ticker) preCandidates.push({
+        ticker,
+        price: snap.price,
+        prevPrice: snap.prevPrice,
+        volume: snap.volume,
+        prevVolume: snap.prevVolume,
+      });
+    }
+
+    console.log(`[penny-scan] Pre-filter: ${Object.keys(snapshots).length} with IEX data | price+vol filter: ${preCandidates.length} passed`);
+
+    // Sort by strongest signal (absolute 1d price change) and cap at 40 before the expensive pipeline.
+    // analyzeCandidate calls Finnhub candles + congress + news + Claude — running 265 would take many minutes.
+    const ranked = preCandidates
+      .map((c) => ({
+        ...c,
+        signal: c.prevPrice > 0 ? Math.abs(c.price - c.prevPrice) / c.prevPrice : 0,
+      }))
+      .sort((a, b) => b.signal - a.signal)
+      .slice(0, 40);
+
+    console.log(`[penny-scan] Ranked top ${ranked.length} by 1d price signal for deep analysis`);
+
+    const rejected: Omit<PennyRejectedCandidate, "_id">[] = [];
+
+    // Phase 1 — cheap inline momentum pre-screen (zero API calls).
+    const needsAI: Array<{ ticker: PennyStockTicker; price: number; prevPrice: number; volume: number; prevVolume: number; priceChange1d: number; volumeSpike: number }> = [];
+
+    for (const { ticker, price, prevPrice, volume, prevVolume } of ranked) {
+      const priceChange1d = prevPrice > 0 ? ((price - prevPrice) / prevPrice) * 100 : 0;
+      const volumeSpike = prevVolume > 0 ? volume / prevVolume : 1;
+
+      if (volumeSpike < 1.5 && Math.abs(priceChange1d) < 3) {
+        rejected.push({
+          scanId,
+          symbol: ticker.symbol,
+          companyName: ticker.name,
+          exchange: ticker.exchange,
+          price,
+          volume,
+          priceChange1d,
+          volumeSpike,
+          rejectionReason: "no_momentum",
+          scannedAt,
+        });
+      } else {
+        needsAI.push({ ticker, price, prevPrice, volume, prevVolume, priceChange1d, volumeSpike });
       }
     }
 
-    if (results.length > 0) {
-      const { scanResults } = await getCollections();
-      await scanResults.insertMany(results as ScanResult[]);
+    // Phase 2 — expensive pipeline (congress + news + Claude), capped at PENNY_MAX_AI_CALLS.
+    const aiQueue = needsAI.slice(0, PENNY_MAX_AI_CALLS);
+    const scanCapped = needsAI.slice(PENNY_MAX_AI_CALLS);
+
+    for (const { ticker, price, prevPrice, volume, prevVolume, priceChange1d, volumeSpike } of scanCapped) {
+      rejected.push({
+        scanId,
+        symbol: ticker.symbol,
+        companyName: ticker.name,
+        exchange: ticker.exchange,
+        price,
+        volume,
+        priceChange1d,
+        volumeSpike,
+        rejectionReason: "scan_cap",
+        scannedAt,
+      });
     }
+
+    console.log(`[penny-scan] momentum✓: ${needsAI.length} | ai_queue: ${aiQueue.length} | scan_cap: ${scanCapped.length}`);
+
+    const { scanResults: scanResultsCol, pennyRejectedCandidates } = await getCollections();
+    let candidatesFound = 0;
+
+    for (let i = 0; i < aiQueue.length; i++) {
+      const { ticker, price, prevPrice, volume, prevVolume, priceChange1d, volumeSpike } = aiQueue[i];
+      if (candidatesFound >= PENNY_MAX_CANDIDATES) break;
+
+      await this.publishProgress(
+        scanId, 3, `Analyzing ${ticker.symbol}…`,
+        25 + Math.round((i / aiQueue.length) * 65),
+        candidatesFound, i, aiQueue.length,
+      );
+
+      try {
+        const result = await this.analyzeCandidate(
+          ticker, scanId, scannedAt, expiresAt,
+          price, prevPrice, volume, prevVolume,
+          {
+            onPassedMomentum: () => { /* already counted above */ },
+            onRejected: (reason) => rejected.push({
+              scanId,
+              symbol: ticker.symbol,
+              companyName: ticker.name,
+              exchange: ticker.exchange,
+              price,
+              volume,
+              priceChange1d,
+              volumeSpike,
+              rejectionReason: reason,
+              scannedAt,
+            }),
+          }
+        );
+        if (result) {
+          const inserted = await scanResultsCol.insertOne(result as ScanResult);
+          candidatesFound++;
+          await this.publishEvent(scanId, {
+            type: "result",
+            scanId,
+            data: { ...result, _id: inserted.insertedId.toHexString() },
+          });
+        }
+      } catch (err) {
+        console.error(`[penny-scan] Error analyzing ${ticker.symbol}:`, err);
+      }
+    }
+
+    console.log(`[penny-scan] candidates: ${candidatesFound} | total_rejected: ${rejected.length}`);
+
+    // Replace all old rejected candidates with the new scan's results
+    await pennyRejectedCandidates.deleteMany({});
+    if (rejected.length > 0) {
+      await pennyRejectedCandidates.insertMany(rejected as PennyRejectedCandidate[]);
+    }
+
+    await this.publishProgress(
+      scanId, 4, `Scan complete — ${candidatesFound} result${candidatesFound !== 1 ? "s" : ""} found`,
+      100, candidatesFound, aiQueue.length, aiQueue.length,
+    );
+    await this.publishEvent(scanId, { type: "done", scanId, candidatesFound });
 
     return {
       scanId,
-      candidatesFound: results.length,
+      candidatesFound,
       scannedAt,
       scansRemainingToday: remaining - 1,
+      sampledCount: sample.length,
+      priceFilteredCount: Object.keys(snapshots).length,
+      volumeFilteredCount: preCandidates.length,
     };
   }
 
@@ -168,43 +392,30 @@ export class PennyStockScanService {
     ticker: PennyStockTicker,
     scanId: string,
     scannedAt: Date,
-    expiresAt: Date
+    expiresAt: Date,
+    price: number,
+    prevPrice: number,
+    todayVolume: number,
+    prevVolume: number,
+    hooks?: {
+      onPassedMomentum?: () => void;
+      onRejected?: (reason: PennyRejectedCandidate["rejectionReason"]) => void;
+    }
   ): Promise<Omit<ScanResult, "_id"> | null> {
-    // Fetch quote from Finnhub (primary for penny stocks per spec)
-    const res = await fetch(
-      `https://finnhub.io/api/v1/quote?symbol=${ticker.symbol}&token=${FINNHUB_KEY}`
-    );
-    if (!res.ok) return null;
-    const q = await res.json() as { c: number; o: number; h: number; l: number; pc: number; v: number; t: number };
+    // Use snapshot data directly — Alpaca IEX bars and Finnhub candles both return no data
+    // for most penny stocks, making those calls pure latency with no benefit.
+    const priceChange1d = prevPrice > 0 ? ((price - prevPrice) / prevPrice) * 100 : 0;
+    const volumeSpike = prevVolume > 0 ? todayVolume / prevVolume : 1;
+    // 5d/20d are unknown without bars; use 1d change as proxy so the momentum gate still works
+    const priceChange5d = priceChange1d;
+    const priceChange20d = priceChange1d;
+    const avgVolume20d = prevVolume || todayVolume;
 
-    const price = q.c;
-    if (!price || price < PENNY_MIN_PRICE || price > PENNY_MAX_PRICE) return null;
-    if (q.v < PENNY_MIN_AVG_VOLUME) return null; // rough daily volume check
-
-    // Fetch 20-day bars for momentum and average volume
-    const bars = await marketDataService.getBars(ticker.symbol, "1Day", 20).catch(() => []);
-    if (bars.length < 5) return null;
-
-    const closes = bars.map((b) => b.close);
-    const volumes = bars.map((b) => b.volume);
-    const avgVolume20d = volumes.reduce((s, v) => s + v, 0) / volumes.length;
-
-    if (avgVolume20d < PENNY_MIN_AVG_VOLUME) return null;
-
-    const todayVolume = q.v;
-    const volumeSpike = avgVolume20d > 0 ? todayVolume / avgVolume20d : 0;
-
-    // Price momentum
-    const price1dAgo = closes[closes.length - 2] ?? price;
-    const price5dAgo = closes[Math.max(0, closes.length - 6)] ?? price;
-    const price20dAgo = closes[0] ?? price;
-
-    const priceChange1d = ((price - price1dAgo) / price1dAgo) * 100;
-    const priceChange5d = ((price - price5dAgo) / price5dAgo) * 100;
-    const priceChange20d = ((price - price20dAgo) / price20dAgo) * 100;
-
-    // Require at least some activity signal: volume spike > 1.5x OR 5d momentum > 5%
-    if (volumeSpike < 1.5 && priceChange5d < 5) return null;
+    if (volumeSpike < 1.5 && Math.abs(priceChange1d) < 3) {
+      hooks?.onRejected?.("no_momentum");
+      return null;
+    }
+    hooks?.onPassedMomentum?.();
 
     // Congress / insider signals
     const [congressSignal, insiderPurchases] = await Promise.all([
@@ -223,7 +434,7 @@ export class PennyStockScanService {
       vix: 20,
       avgDailyVolume: avgVolume20d,
       positionSizePct: PENNY_MAX_POSITION_PCT,
-      tradingWithTrend: price >= closes.reduce((a, b) => a + b, 0) / closes.length,
+      tradingWithTrend: priceChange1d >= 0,
     });
     const riskScore = Math.max(PENNY_MIN_TIER1_RISK, tier1.score);
 
@@ -243,7 +454,10 @@ export class PennyStockScanService {
       newsHeadlines: recentNews.slice(0, 3).map((n) => n.headline),
     });
 
-    if (!aiAnalysis || aiAnalysis.confidence < 40) return null;
+    if (!aiAnalysis || aiAnalysis.confidence < 40) {
+      hooks?.onRejected?.("low_ai_confidence");
+      return null;
+    }
 
     const newsHeadlines = recentNews.slice(0, 5).map((n) => ({
       headline: n.headline,
@@ -254,13 +468,25 @@ export class PennyStockScanService {
 
     const triggers: ScanResult["triggers"] = [];
 
-    if (volumeSpike >= 2) {
+    // Threshold matches the momentum gate above (1.5x) — previously was 2x causing a logic gap
+    // where tickers could pass the gate but generate no triggers.
+    if (volumeSpike >= 1.5) {
       triggers.push({
         type: "political_event",
-        description: `Volume spike: ${volumeSpike.toFixed(1)}x 20-day average`,
+        description: `Volume spike: ${volumeSpike.toFixed(1)}x average`,
         date: scannedAt,
         source: "volume_analysis",
-        relevanceScore: Math.min(1, volumeSpike / 5),
+        relevanceScore: Math.min(1, volumeSpike / 4),
+      });
+    }
+
+    if (Math.abs(priceChange1d) >= 3) {
+      triggers.push({
+        type: "political_event",
+        description: `1-day price move: ${priceChange1d >= 0 ? "+" : ""}${priceChange1d.toFixed(1)}%`,
+        date: scannedAt,
+        source: "price_momentum",
+        relevanceScore: Math.min(1, Math.abs(priceChange1d) / 15),
       });
     }
 
@@ -284,7 +510,10 @@ export class PennyStockScanService {
       });
     }
 
-    if (triggers.length === 0) return null;
+    if (triggers.length === 0) {
+      hooks?.onRejected?.("no_triggers");
+      return null;
+    }
 
     const congressCluster =
       congressSignal && congressSignal.signal !== "neutral"
@@ -343,6 +572,22 @@ export class PennyStockScanService {
         exchange: ticker.exchange,
       },
     };
+  }
+
+  private async getFinnhubBars(symbol: string, days: number): Promise<{ close: number; volume: number }[]> {
+    try {
+      const to = Math.floor(Date.now() / 1000);
+      const from = to - days * 86400;
+      const res = await fetch(
+        `https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=D&from=${from}&to=${to}&token=${FINNHUB_KEY}`
+      );
+      if (!res.ok) return [];
+      const data = await res.json() as { s: string; c: number[]; v: number[] };
+      if (data.s !== "ok" || !data.c?.length) return [];
+      return data.c.map((close, i) => ({ close, volume: data.v[i] ?? 0 }));
+    } catch {
+      return [];
+    }
   }
 
   private async runPennyAnalysis(params: {
@@ -413,6 +658,15 @@ Return valid JSON only, no markdown.`;
     } catch {
       return null;
     }
+  }
+
+  async getLatestRejected(): Promise<PennyRejectedCandidate[]> {
+    const { pennyRejectedCandidates } = await getCollections();
+    return pennyRejectedCandidates
+      .find({})
+      .sort({ scannedAt: -1 })
+      .limit(100)
+      .toArray();
   }
 
   async getLatestResults(limit = 20): Promise<ScanResult[]> {

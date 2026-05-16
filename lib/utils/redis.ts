@@ -24,4 +24,5 @@ export const REDIS_KEYS = {
   pennyScanCount: (date: string) => `penny_scan:daily_count:${date}`,
   entryTimingCount: (userId: string, date: string) => `entry_timing:${userId}:${date}`,
   notifUnread: (userId: string) => `notif:unread:${userId}`,
+  scanEvents: (scanId: string) => `scan:events:${scanId}`,
 } as const;

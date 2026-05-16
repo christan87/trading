@@ -239,7 +239,32 @@ export class OptionsScanService {
     await redis.set(key, current + 1, { ex: 86400 });
   }
 
-  async runOptionsScan(params: OptionsScanParams): Promise<OptionsScanSummary> {
+  private async publishEvent(scanId: string, event: object): Promise<void> {
+    try {
+      const redis = getRedis();
+      const key = REDIS_KEYS.scanEvents(scanId);
+      await redis.rpush(key, JSON.stringify(event));
+      await redis.expire(key, 300);
+    } catch { /* non-fatal */ }
+  }
+
+  private async publishProgress(
+    scanId: string,
+    step: number,
+    stepLabel: string,
+    percentComplete: number,
+    candidatesFound: number,
+    candidatesAnalyzed: number,
+    candidatesTotal: number,
+  ): Promise<void> {
+    await this.publishEvent(scanId, {
+      type: "progress",
+      scanId, step, stepLabel, percentComplete,
+      candidatesFound, candidatesAnalyzed, candidatesTotal,
+    });
+  }
+
+  async runOptionsScan(params: OptionsScanParams, providedScanId?: string): Promise<OptionsScanSummary> {
     const { allowed, remaining } = await this.checkDailyLimit();
     if (!allowed) {
       return {
@@ -254,15 +279,24 @@ export class OptionsScanService {
 
     await this.incrementDailyCount();
 
-    const scanId = new ObjectId().toHexString();
+    const scanId = providedScanId ?? new ObjectId().toHexString();
     const scannedAt = new Date();
     const expiresAt = new Date(Date.now() + SCAN_EXPIRY_DAYS * 86400_000);
 
     const tickers = this.selectTickers(params.tickers);
-    const results: Omit<ScanResult, "_id">[] = [];
+    const { scanResults: scanResultsCol } = await getCollections();
+    let candidatesFound = 0;
     let anyPlanLimited = false;
 
-    for (const symbol of tickers) {
+    await this.publishProgress(scanId, 1, "Starting options scan…", 5, 0, 0, tickers.length);
+
+    for (let i = 0; i < tickers.length; i++) {
+      const symbol = tickers[i];
+      await this.publishProgress(
+        scanId, 2, `Analyzing ${symbol}…`,
+        10 + Math.round((i / tickers.length) * 85),
+        candidatesFound, i, tickers.length,
+      );
       try {
         const result = await this.analyzeTicker(
           symbol, params, scanId, scannedAt, expiresAt
@@ -271,25 +305,34 @@ export class OptionsScanService {
           anyPlanLimited = true;
           continue;
         }
-        if (result) results.push(result);
+        if (result) {
+          const inserted = await scanResultsCol.insertOne(result as ScanResult);
+          candidatesFound++;
+          if (!anyPlanLimited && result.optionScanDetails?.impliedVolatility === null) {
+            anyPlanLimited = true;
+          }
+          await this.publishEvent(scanId, {
+            type: "result",
+            scanId,
+            data: { ...result, _id: inserted.insertedId.toHexString() },
+          });
+        }
       } catch (err) {
         console.error(`[options-scan] ${symbol} error:`, String(err));
       }
     }
-    // If results have null IV it means we used synthetic contracts (no real options data available)
-    if (!anyPlanLimited && results.some((r) => r.optionScanDetails?.impliedVolatility === null)) {
-      anyPlanLimited = true;
-    }
-    console.log(`[options-scan] ${results.length} results from ${tickers.length} tickers, planLimited=${anyPlanLimited}`);
 
-    if (results.length > 0) {
-      const { scanResults } = await getCollections();
-      await scanResults.insertMany(results as ScanResult[]);
-    }
+    console.log(`[options-scan] ${candidatesFound} results from ${tickers.length} tickers, planLimited=${anyPlanLimited}`);
+
+    await this.publishProgress(
+      scanId, 3, `Scan complete — ${candidatesFound} result${candidatesFound !== 1 ? "s" : ""} found`,
+      100, candidatesFound, tickers.length, tickers.length,
+    );
+    await this.publishEvent(scanId, { type: "done", scanId, candidatesFound });
 
     return {
       scanId,
-      candidatesFound: results.length,
+      candidatesFound,
       planLimited: anyPlanLimited,
       scannedAt,
       scansRemainingToday: remaining - 1,
